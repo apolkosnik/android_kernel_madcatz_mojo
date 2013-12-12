@@ -17,6 +17,7 @@
 #include <linux/workqueue.h>
 #include <linux/leds.h>
 #include <linux/errno.h>
+#include <linux/types.h>
 
 struct device;
 
@@ -146,6 +147,8 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_USB_HC,
 	POWER_SUPPLY_PROP_USB_OTG,
 	POWER_SUPPLY_PROP_CHARGE_ENABLED,
+	/* Local extensions of type int64_t */
+	POWER_SUPPLY_PROP_CHARGE_COUNTER_EXT,
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_MANUFACTURER,
@@ -166,6 +169,7 @@ enum power_supply_type {
 union power_supply_propval {
 	int intval;
 	const char *strval;
+	int64_t int64val;
 };
 
 struct power_supply {
@@ -240,16 +244,14 @@ struct power_supply_info {
 	int use_for_apm;
 };
 
+extern struct power_supply *power_supply_get_by_name(const char *name);
 extern void power_supply_changed(struct power_supply *psy);
 extern int power_supply_am_i_supplied(struct power_supply *psy);
 extern int power_supply_set_battery_charged(struct power_supply *psy);
 
 #ifdef CONFIG_POWER_SUPPLY
-extern struct power_supply *power_supply_get_by_name(const char *name);
 extern int power_supply_is_system_supplied(void);
 #else
-static inline struct power_supply *power_supply_get_by_name(const char *name)
-{ return NULL; }
 static inline int power_supply_is_system_supplied(void) { return -ENOSYS; }
 #endif
 
