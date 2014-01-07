@@ -184,8 +184,11 @@ struct mapped_device {
 	/* forced geometry settings */
 	struct hd_geometry geometry;
 
-	/* kobject and completion */
-	struct dm_kobject_holder kobj_holder;
+	/* sysfs handle */
+	struct kobject kobj;
+
+	/* wait until the kobject is released */
+	struct completion kobj_completion;
 
 	/* zero-length flush that will be cloned and submitted to targets */
 	struct bio flush_bio;
@@ -386,12 +389,10 @@ static int dm_blk_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
 	struct mapped_device *md = bdev->bd_disk->private_data;
-	struct dm_table *map;
+	struct dm_table *map = dm_get_live_table(md);
 	struct dm_target *tgt;
 	int r = -ENOTTY;
 
-retry:
-	map = dm_get_live_table(md);
 	if (!map || !dm_table_get_size(map))
 		goto out;
 
@@ -411,11 +412,6 @@ retry:
 
 out:
 	dm_table_put(map);
-
-	if (r == -ENOTCONN) {
-		msleep(10);
-		goto retry;
-	}
 
 	return r;
 }
@@ -1904,7 +1900,7 @@ static struct mapped_device *alloc_dev(int minor)
 	init_waitqueue_head(&md->wait);
 	INIT_WORK(&md->work, dm_wq_work);
 	init_waitqueue_head(&md->eventq);
-	init_completion(&md->kobj_holder.completion);
+	init_completion(&md->kobj_completion);
 
 	md->disk->major = _major;
 	md->disk->first_minor = minor;
@@ -2218,17 +2214,6 @@ struct target_type *dm_get_immutable_target_type(struct mapped_device *md)
 {
 	return md->immutable_target_type;
 }
-
-/*
- * The queue_limits are only valid as long as you have a reference
- * count on 'md'.
- */
-struct queue_limits *dm_get_queue_limits(struct mapped_device *md)
-{
-	BUG_ON(!atomic_read(&md->holders));
-	return &md->queue->limits;
-}
-EXPORT_SYMBOL_GPL(dm_get_queue_limits);
 
 /*
  * Fully initialize a request-based queue (->elevator, ->request_fn, etc).
@@ -2736,14 +2721,20 @@ struct gendisk *dm_disk(struct mapped_device *md)
 
 struct kobject *dm_kobject(struct mapped_device *md)
 {
-	return &md->kobj_holder.kobj;
+	return &md->kobj;
 }
 
+/*
+ * struct mapped_device should not be exported outside of dm.c
+ * so use this check to verify that kobj is part of md structure
+ */
 struct mapped_device *dm_get_from_kobject(struct kobject *kobj)
 {
 	struct mapped_device *md;
 
-	md = container_of(kobj, struct mapped_device, kobj_holder.kobj);
+	md = container_of(kobj, struct mapped_device, kobj);
+	if (&md->kobj != kobj)
+		return NULL;
 
 	if (test_bit(DMF_FREEING, &md->flags) ||
 	    dm_deleting_md(md))
@@ -2751,6 +2742,13 @@ struct mapped_device *dm_get_from_kobject(struct kobject *kobj)
 
 	dm_get(md);
 	return md;
+}
+
+struct completion *dm_get_completion_from_kobject(struct kobject *kobj)
+{
+	struct mapped_device *md = container_of(kobj, struct mapped_device, kobj);
+
+	return &md->kobj_completion;
 }
 
 int dm_suspended_md(struct mapped_device *md)
