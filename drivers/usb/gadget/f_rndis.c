@@ -480,7 +480,7 @@ static void rndis_command_complete(struct usb_ep *ep, struct usb_request *req)
 			rndis->port.multi_pkt_xfer = 1;
 		else
 			rndis->port.multi_pkt_xfer = 0;
-		pr_info("%s: MaxTransferSize: %d : Multi_pkt_txr: %s\n",
+		DBG(cdev, "%s: MaxTransferSize: %d : Multi_pkt_txr: %s\n",
 				__func__, buf->MaxTransferSize,
 				rndis->port.multi_pkt_xfer ? "enabled" :
 							    "disabled");
@@ -827,7 +827,6 @@ rndis_unbind(struct usb_configuration *c, struct usb_function *f)
 
 	rndis_deregister(rndis->config);
 	rndis_exit();
-	rndis_string_defs[0].id = 0;
 
 	rndis_string_defs[0].id = 0;
 	usb_free_all_descriptors(f);
