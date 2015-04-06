@@ -1,7 +1,6 @@
 /* include/linux/wlan_plat.h
  *
- * Copyright (c) 2010 Google, Inc.
- * Copyright (c) 2013 NVIDIA Corporation. All rights reserved.
+ * Copyright (C) 2010 Google, Inc.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -29,6 +28,14 @@ struct wifi_platform_data {
 	int (*get_wake_irq)(void);
 	void *(*get_country_code)(char *ccode, u32 flags);
 	struct sysedp_consumer *sysedpc;
+#ifdef CONFIG_PARTIALRESUME
+#define WIFI_PR_INIT			0
+#define WIFI_PR_NOTIFY_RESUME		1
+#define WIFI_PR_VOTE_FOR_RESUME		2
+#define WIFI_PR_VOTE_FOR_SUSPEND	3
+#define WIFI_PR_WAIT_FOR_READY		4
+	bool (*partial_resume)(int action);
+#endif
 };
 
 #endif
