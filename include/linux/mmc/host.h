@@ -1,8 +1,6 @@
 /*
  *  linux/include/linux/mmc/host.h
  *
- *  Copyright (c) 2013, NVIDIA CORPORATION. All Rights Reserved.
- *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
@@ -18,7 +16,6 @@
 #include <linux/device.h>
 #include <linux/fault-inject.h>
 #include <linux/wakelock.h>
-#include <linux/devfreq.h>
 
 #include <linux/mmc/core.h>
 #include <linux/mmc/pm.h>
@@ -143,15 +140,6 @@ struct mmc_host_ops {
 	int	(*select_drive_strength)(unsigned int max_dtr, int host_drv, int card_drv);
 	void	(*hw_reset)(struct mmc_host *host);
 	void	(*card_event)(struct mmc_host *host);
-
-	/*
-	 * Device frequency scaling optional callbacks to allow for custom
-	 * algorithms to determine the target frequency.
-	 */
-	int	(*dfs_governor_init)(struct mmc_host *host);
-	void	(*dfs_governor_exit)(struct mmc_host *host);
-	int	(*dfs_governor_get_target)(struct mmc_host *host,
-		unsigned long *freq);
 };
 
 struct mmc_card;
@@ -208,17 +196,33 @@ struct mmc_supply {
 	struct regulator *vqmmc;	/* Optional Vccq supply */
 };
 
-struct mmc_dev_stats {
-	/* Device busy and total times in the current interval */
-	unsigned long		busy_time;
-	unsigned long		total_time;
-
-	/* Active and polling timestamps used for time calculation */
-	ktime_t			t_busy;
-	ktime_t			t_interval;
-
-	unsigned int		polling_interval;
-	bool			update_dev_freq;
+/*
+ * X-axis for IO latency histogram support.
+ */
+static const u_int64_t latency_x_axis_us[] = {
+	100,
+	200,
+	300,
+	400,
+	500,
+	600,
+	700,
+	800,
+	900,
+	1000,
+	1200,
+	1400,
+	1600,
+	1800,
+	2000,
+	2500,
+	3000,
+	4000,
+	5000,
+	6000,
+	7000,
+	9000,
+	10000
 };
 
 struct mmc_host {
@@ -307,8 +311,6 @@ struct mmc_host {
 #define MMC_CAP2_PACKED_CMD	(MMC_CAP2_PACKED_RD | \
 				 MMC_CAP2_PACKED_WR)
 #define MMC_CAP2_NO_PRESCAN_POWERUP (1 << 14)	/* Don't power up before scan */
-#define MMC_CAP2_FREQ_SCALING	(1 << 15)	/* Allow frequency scaling */
-#define MMC_CAP2_CLOCK_GATING	(1 << 16)	/* Enable Clock Gating */
 
 	mmc_pm_flag_t		pm_caps;	/* supported pm features */
 
@@ -323,7 +325,6 @@ struct mmc_host {
 	struct device_attribute clkgate_delay_attr;
 	unsigned long           clkgate_delay;
 #endif
-	bool			skip_host_clkgate;
 
 	/* host specific block data */
 	unsigned int		max_seg_size;	/* see blk_queue_max_segment_size */
@@ -376,13 +377,6 @@ struct mmc_host {
 
 	mmc_pm_flag_t		pm_flags;	/* requested pm features */
 
-	/* MMC DFS and devfreq information */
-	struct devfreq			*df;
-	struct devfreq_dev_profile	*df_profile;
-	struct devfreq_dev_status	*devfreq_stats;
-	struct mmc_dev_stats		*dev_stats;
-	struct delayed_work		dfs_work;
-
 	struct led_trigger	*led;		/* activity led */
 
 #ifdef CONFIG_REGULATOR
@@ -411,6 +405,15 @@ struct mmc_host {
 		int				num_funcs;
 	} embedded_sdio_data;
 #endif
+
+#define MMC_IO_LAT_HIST_DISABLE         0
+#define MMC_IO_LAT_HIST_ENABLE          1
+#define MMC_IO_LAT_HIST_ZERO            2
+	int		latency_hist_enabled;
+	u_int64_t	latency_y_axis_read[ARRAY_SIZE(latency_x_axis_us) + 1];
+	u_int64_t	latency_reads_elems;
+	u_int64_t	latency_y_axis_write[ARRAY_SIZE(latency_x_axis_us) + 1];
+	u_int64_t	latency_writes_elems;
 
 	unsigned long		private[0] ____cacheline_aligned;
 };
@@ -498,9 +501,6 @@ int mmc_card_sleep(struct mmc_host *host);
 int mmc_card_can_sleep(struct mmc_host *host);
 
 int mmc_pm_notify(struct notifier_block *notify_block, unsigned long, void *);
-int mmc_speed_class_control(struct mmc_host *host,
-	unsigned int speed_class_ctrl_arg);
-
 
 /* Module parameter */
 extern bool mmc_assume_removable;
