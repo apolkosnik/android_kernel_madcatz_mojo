@@ -5,7 +5,6 @@
  *  SD support Copyright (C) 2004 Ian Molton, All Rights Reserved.
  *  Copyright (C) 2005-2008 Pierre Ossman, All Rights Reserved.
  *  MMCv4 support Copyright (C) 2006 Philip Langdale, All Rights Reserved.
- *  Copyright (c) 2012-2013, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -29,8 +28,6 @@
 #include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/wakelock.h>
-#include <linux/devfreq.h>
-#include <linux/slab.h>
 
 #include <trace/events/mmc.h>
 
@@ -39,7 +36,7 @@
 #include <linux/mmc/mmc.h>
 #include <linux/mmc/sd.h>
 
-#include <governor.h>
+#include <linux/math64.h>
 
 #include "core.h"
 #include "bus.h"
@@ -180,19 +177,6 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 {
 	struct mmc_command *cmd = mrq->cmd;
 	int err = cmd->error;
-#ifdef CONFIG_MMC_FREQ_SCALING
-	ktime_t t;
-	unsigned long time;
-	unsigned long flags;
-
-	if (host->dev_stats) {
-		t = ktime_get();
-		time = ktime_us_delta(t, host->dev_stats->t_busy);
-		spin_lock_irqsave(&host->lock, flags);
-		host->dev_stats->busy_time += time;
-		spin_unlock_irqrestore(&host->lock, flags);
-	}
-#endif
 
 	if (err && cmd->retries && mmc_host_is_spi(host)) {
 		if (cmd->resp[0] & R1_SPI_ILLEGAL_COMMAND)
@@ -312,20 +296,6 @@ mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 	}
 	mmc_host_clk_hold(host);
 	led_trigger_event(host->led, LED_FULL);
-
-#ifdef CONFIG_MMC_FREQ_SCALING
-	if (host->df && host->dev_stats) {
-		if (host->dev_stats->update_dev_freq) {
-			mmc_set_clock(host, host->ios.clock);
-			mutex_lock(&host->df->lock);
-			host->df->previous_freq = host->actual_clock;
-			mutex_unlock(&host->df->lock);
-			host->dev_stats->update_dev_freq = false;
-		}
-		host->dev_stats->t_busy = ktime_get();
-	}
-#endif
-
 	host->ops->request(host, mrq);
 }
 
@@ -518,11 +488,6 @@ static void mmc_wait_for_req_done(struct mmc_host *host,
 			 mmc_hostname(host), cmd->opcode, cmd->error);
 		cmd->retries--;
 		cmd->error = 0;
-		if (mrq->data) {
-			mrq->data->error = 0;
-			if (mrq->stop)
-				mrq->stop->error = 0;
-		}
 		host->ops->request(host, mrq);
 	}
 }
@@ -1476,7 +1441,6 @@ int mmc_set_signal_voltage(struct mmc_host *host, int signal_voltage)
 	 */
 	clock = host->ios.clock;
 	host->ios.clock = 0;
-	host->skip_host_clkgate = true;
 	mmc_set_ios(host);
 
 	if (__mmc_set_signal_voltage(host, signal_voltage)) {
@@ -1491,7 +1455,6 @@ int mmc_set_signal_voltage(struct mmc_host *host, int signal_voltage)
 	/* Keep clock gated for at least 5 ms */
 	mmc_delay(5);
 	host->ios.clock = clock;
-	host->skip_host_clkgate = false;
 	mmc_set_ios(host);
 
 	/* Wait for at least 1 ms according to spec */
@@ -1575,6 +1538,9 @@ static void mmc_power_up(struct mmc_host *host)
 	host->ios.timing = MMC_TIMING_LEGACY;
 	mmc_set_ios(host);
 
+	/* Set signal voltage to 3.3V */
+	__mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330);
+
 	/*
 	 * This delay should be sufficient to allow the power supply
 	 * to reach the minimum voltage.
@@ -1585,9 +1551,6 @@ static void mmc_power_up(struct mmc_host *host)
 
 	host->ios.power_mode = MMC_POWER_ON;
 	mmc_set_ios(host);
-
-	/* Set signal voltage to 3.3V */
-	__mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330);
 
 	/*
 	 * This delay must be at least 74 clock sizes, or 1 ms, or the
@@ -2604,304 +2567,6 @@ void mmc_stop_host(struct mmc_host *host)
 	mmc_power_off(host);
 }
 
-int mmc_speed_class_control(struct mmc_host *host,
-	unsigned int speed_class_ctrl_arg)
-{
-	int err = -ENOSYS;
-	u32 status;
-
-	err = mmc_send_speed_class_ctrl(host, speed_class_ctrl_arg);
-	if (err)
-		return err;
-
-	/* Issue CMD13 to check for any errors during the busy period of CMD20 */
-	err = mmc_send_status(host->card, &status);
-	if (!err) {
-		if (status & R1_ERROR)
-			err = -EINVAL;
-	}
-	return err;
-}
-EXPORT_SYMBOL(mmc_speed_class_control);
-
-#ifdef CONFIG_MMC_FREQ_SCALING
-/*
- * This function queries the device status for the current interval and
- * calculates the desired frequency to be set.
- *
- * For now, this function queries the device status and lets the platform
- * specific implementation(if any) determine the desired frequency.
- * If there is no such implementation, previous frequency will be
-  * maintained.
- */
-static int mmc_get_target_freq(struct devfreq *df, unsigned long *freq)
-{
-	struct mmc_host *host = container_of(df->dev.parent,
-		struct mmc_host, class_dev);
-	int err = 0;
-
-	/* Get the device status for the current interval */
-	err = df->profile->get_dev_status(df->dev.parent, host->devfreq_stats);
-	if (err)
-		dev_err(mmc_dev(host),
-			"Failed to get the device status %d\n", err);
-
-	/* Determine the target frequency */
-	if (host->ops->dfs_governor_get_target)
-		err = host->ops->dfs_governor_get_target(host, freq);
-	else
-		*freq = df->previous_freq;
-
-	return 0;
-}
-
-/*
- * MMC freq governor calls this function at periodic intervals to query
- * the device status and set frequency update request if required.
- * The default interval is 100msec. It can be changed by the platform
- * specific callback for governor initialization to suit the algorithm
- * implementation.
- */
-static void mmc_update_devfreq(struct work_struct *work)
-{
-	struct mmc_host *host = container_of(work, struct mmc_host,
-		dfs_work.work);
-	unsigned long freq;
-
-	if (!host->df)
-		return;
-
-	mmc_get_target_freq(host->df, &freq);
-	/*
-	 * If the new frequency is not matching the previous frequency, call
-	 * update_freq to set the new frequency.
-	 */
-	if (freq != host->df->previous_freq) {
-		mutex_lock(&host->df->lock);
-		update_devfreq(host->df);
-		mutex_unlock(&host->df->lock);
-	}
-
-	/* Schedule work to query the device status for the next interval */
-	schedule_delayed_work(&host->dfs_work,
-		msecs_to_jiffies(host->dev_stats->polling_interval));
-}
-
-static int mmc_freq_gov_init(struct devfreq *df)
-{
-	struct mmc_host *host = container_of(df->dev.parent,
-		struct mmc_host, class_dev);
-	int err = 0;
-
-	host->devfreq_stats = devm_kzalloc(mmc_dev(host),
-			sizeof(struct devfreq_dev_status), GFP_KERNEL);
-	if (!host->devfreq_stats) {
-		dev_err(mmc_dev(host),
-			"Failed to initialize governor data\n");
-		return -ENOMEM;
-	}
-
-	/* Set the default polling interval to 100 */
-	host->dev_stats->polling_interval = 100;
-
-	/*
-	 * A platform specific hook for doing any necessary initialization
-	 * for the mmc frequency governor.
-	 */
-	if (host->ops->dfs_governor_init) {
-		err = host->ops->dfs_governor_init(host);
-		if (err) {
-			dev_err(mmc_dev(host),
-				"DFS governor init failed %d\n", err);
-			goto err_governor_init;
-		}
-	}
-
-	/*
-	 * The delayed work is used to query the device status at
-	 * periodic intervals.
-	 */
-	INIT_DELAYED_WORK(&host->dfs_work, mmc_update_devfreq);
-
-	schedule_delayed_work(&host->dfs_work,
-		msecs_to_jiffies(host->dev_stats->polling_interval));
-
-err_governor_init:
-	return err;
-}
-
-static void mmc_freq_gov_exit(struct devfreq *df)
-{
-	struct mmc_host *host = container_of(df->dev.parent,
-		struct mmc_host, class_dev);
-
-	/* Cancel any pending work scheduled for polling the device status */
-	cancel_delayed_work_sync(&host->dfs_work);
-
-	if (host->ops->dfs_governor_exit)
-		host->ops->dfs_governor_exit(host);
-}
-
-const struct devfreq_governor mmc_freq_governor = {
-	.name = "mmc_dfs_governor",
-	.get_target_freq = mmc_get_target_freq,
-	.init = mmc_freq_gov_init,
-	.exit = mmc_freq_gov_exit,
-	.no_central_polling = false,
-};
-
-/*
- * This function will be called from update_devfreq and will set the
- * desired frequency. To avoid changing the device frequency
- * during an ongoing data transfer, this function will set the flag
- * to indicate a need for change in devfreq. The frequency will be
- * changed before a new command is issued.
- */
-static int mmc_devfreq_target(struct device *dev, unsigned long *freq,
-	u32 flags)
-{
-	struct mmc_host *host = container_of(dev,
-		struct mmc_host, class_dev);
-	struct devfreq *df = host->df;
-
-	host->dev_stats->update_dev_freq = false;
-
-	/* Check if the desired frequency is same as the current frequency */
-	if (*freq == host->actual_clock)
-		return 0;
-
-	/*
-	 * Check if the requested frequency falls within the supported min and
-	 * max frequencies.
-	 */
-	if (*freq > host->f_max)
-		*freq = host->f_max;
-	else if (*freq < host->f_min)
-		*freq = host->f_min;
-
-	/*
-	 * Update the new frequency in mmc ios and set the update_dev_freq
-	 * flag to indicate a freq change request.
-	 */
-	host->ios.clock = *freq;
-	host->dev_stats->update_dev_freq = true;
-
-	pr_debug("%s: Changing freq from %ld to %ld\n", mmc_hostname(host),
-		df->previous_freq, *freq);
-
-	return 0;
-}
-
-static int mmc_devfreq_get_status(struct device *dev,
-	struct devfreq_dev_status *stat)
-{
-	struct mmc_host *host = container_of(dev, struct mmc_host, class_dev);
-	struct mmc_dev_stats *dev_stats = host->dev_stats;
-	ktime_t t;
-	unsigned long flags;
-
-	spin_lock_irqsave(&host->lock, flags);
-	stat->busy_time = dev_stats->busy_time;
-	dev_stats->busy_time = 0;
-	spin_unlock_irqrestore(&host->lock, flags);
-
-	if (dev_stats) {
-		t = ktime_get();
-		dev_stats->total_time += ktime_us_delta(t,
-			dev_stats->t_interval);
-	}
-	stat->total_time = dev_stats->total_time;
-	stat->current_frequency = host->actual_clock;
-
-	/* Clear out stale data */
-	dev_stats->total_time = 0;
-	dev_stats->t_interval = t;
-
-	return 0;
-}
-
-static struct devfreq_dev_profile mmc_df_profile = {
-	.polling_ms = 0,
-	.target = mmc_devfreq_target,
-	.get_dev_status = mmc_devfreq_get_status,
-};
-
-int mmc_devfreq_init(struct mmc_host *host)
-{
-	struct devfreq *df;
-
-	/* Return if already registered for device frequency */
-	if (host->df) {
-		schedule_delayed_work(&host->dfs_work,
-			msecs_to_jiffies(host->dev_stats->polling_interval));
-		return 0;
-	}
-
-	/* Set the device profile */
-	host->df_profile = devm_kzalloc(mmc_dev(host),
-			sizeof(struct devfreq_dev_profile), GFP_KERNEL);
-	if (!host->df_profile) {
-		dev_err(mmc_dev(host), "Failed to create devfreq structure\n");
-		return -ENOMEM;
-	}
-	host->df_profile->polling_ms = mmc_df_profile.polling_ms;
-	host->df_profile->target = mmc_df_profile.target;
-	host->df_profile->get_dev_status = mmc_df_profile.get_dev_status;
-	host->df_profile->initial_freq = host->actual_clock;
-
-	/* Initialize the device stats */
-	host->dev_stats = devm_kzalloc(mmc_dev(host),
-			sizeof(struct mmc_dev_stats), GFP_KERNEL);
-	if (!host->dev_stats) {
-		dev_err(mmc_dev(host),
-			"Failed to initialize the device stats\n");
-		return -ENOMEM;
-	} else {
-		host->dev_stats->busy_time = 0;
-		host->dev_stats->t_interval = ktime_get();
-	}
-
-	df = devfreq_add_device(&host->class_dev, host->df_profile,
-			&mmc_freq_governor, NULL);
-	if (IS_ERR_OR_NULL(df)) {
-		dev_err(mmc_dev(host),
-			"Failed to register with devfreq %ld\n", PTR_ERR(df));
-		df = NULL;
-		return -ENODEV;
-	}
-
-	/* Set the frequency constraints for the device */
-	df->min_freq = 0;
-	if (mmc_card_mmc(host->card)) {
-		df->max_freq = max(host->card->ext_csd.hs_max_dtr,
-			host->card->csd.max_dtr);
-	} else if (mmc_card_sd(host->card) || mmc_card_sdio(host->card)) {
-		df->max_freq = max(host->card->sw_caps.uhs_max_dtr,
-			host->card->sw_caps.hs_max_dtr);
-	} else {
-		dev_err(mmc_dev(host), "unknown card type %d\n",
-			host->card->type);
-		df->max_freq = host->actual_clock;
-	}
-
-	host->df = df;
-
-	return 0;
-}
-
-int mmc_devfreq_deinit(struct mmc_host *host)
-{
-	int err = 0;
-
-	if (host->df) {
-		err = devfreq_remove_device(host->df);
-		host->df = NULL;
-	}
-
-	return err;
-}
-#endif
-
 int mmc_power_save_host(struct mmc_host *host)
 {
 	int ret = 0;
@@ -2916,11 +2581,6 @@ int mmc_power_save_host(struct mmc_host *host)
 		mmc_bus_put(host);
 		return -EINVAL;
 	}
-
-#ifdef CONFIG_MMC_FREQ_SCALING
-	if (host->df)
-		cancel_delayed_work_sync(&host->dfs_work);
-#endif
 
 	if (host->bus_ops->power_save)
 		ret = host->bus_ops->power_save(host);
@@ -2950,12 +2610,6 @@ int mmc_power_restore_host(struct mmc_host *host)
 
 	mmc_power_up(host);
 	ret = host->bus_ops->power_restore(host);
-
-#ifdef CONFIG_MMC_FREQ_SCALING
-	if (host->df)
-		schedule_delayed_work(&host->dfs_work,
-			msecs_to_jiffies(host->dev_stats->polling_interval));
-#endif
 
 	mmc_bus_put(host);
 
@@ -3047,18 +2701,6 @@ int mmc_suspend_host(struct mmc_host *host)
 	if (mmc_bus_needs_resume(host))
 		return 0;
 
-#ifdef CONFIG_MMC_FREQ_SCALING
-	if (host->df) {
-		ktime_t t;
-
-		cancel_delayed_work_sync(&host->dfs_work);
-
-		t = ktime_get();
-		host->dev_stats->total_time = ktime_us_delta(t,
-			host->dev_stats->t_interval);
-	}
-#endif
-
 	if (cancel_delayed_work(&host->detect))
 		wake_unlock(&host->detect_wake_lock);
 	mmc_flush_scheduled_work();
@@ -3144,16 +2786,6 @@ int mmc_resume_host(struct mmc_host *host)
 		}
 	}
 	host->pm_flags &= ~MMC_PM_KEEP_POWER;
-
-#ifdef CONFIG_MMC_FREQ_SCALING
-	if (host->df) {
-		host->dev_stats->t_interval = ktime_get();
-
-		schedule_delayed_work(&host->dfs_work,
-			msecs_to_jiffies(host->dev_stats->polling_interval));
-	}
-#endif
-
 	mmc_bus_put(host);
 
 	return err;
@@ -3327,19 +2959,19 @@ latency_hist_show(struct device *dev, struct device_attribute *attr, char *buf)
 	int i;
 	struct mmc_host *host = cls_dev_to_mmc_host(dev);
 	int bytes_written = 0;
-	int pct, num_elem;
-	u_int64_t elem;
+	u_int64_t num_elem, elem;
+	int pct;
 
 	num_elem = host->latency_reads_elems;
 	if (num_elem > 0) {
 		bytes_written += scnprintf(buf + bytes_written,
-					   PAGE_SIZE - bytes_written,
-					   "IO svc_time Read Latency Histogram :\n");
+			   PAGE_SIZE - bytes_written,
+			   "IO svc_time Read Latency Histogram :\n");
 		for (i = 0;
 		     i < ARRAY_SIZE(latency_x_axis_us);
 		     i++) {
 			elem = host->latency_y_axis_read[i];
-			pct = (elem * 100) / num_elem;
+			pct = div64_u64(elem * 100, num_elem);
 			bytes_written += scnprintf(buf + bytes_written,
 						   PAGE_SIZE - bytes_written,
 						   "\t< %5lluus%15llu%15d%%\n",
@@ -3348,7 +2980,7 @@ latency_hist_show(struct device *dev, struct device_attribute *attr, char *buf)
 		}
 		/* Last element in y-axis table is overflow */
 		elem = host->latency_y_axis_read[i];
-		pct = (elem * 100) / num_elem;
+		pct = div64_u64(elem * 100, num_elem);
 		bytes_written += scnprintf(buf + bytes_written,
 					   PAGE_SIZE - bytes_written,
 					   "\t> %5dms%15llu%15d%%\n", 10,
@@ -3363,7 +2995,7 @@ latency_hist_show(struct device *dev, struct device_attribute *attr, char *buf)
 		     i < ARRAY_SIZE(latency_x_axis_us);
 		     i++) {
 			elem = host->latency_y_axis_write[i];
-			pct = (elem * 100) / num_elem;
+			pct = div64_u64(elem * 100, num_elem);
 			bytes_written += scnprintf(buf + bytes_written,
 						   PAGE_SIZE - bytes_written,
 						   "\t< %5lluus%15llu%15d%%\n",
@@ -3372,7 +3004,7 @@ latency_hist_show(struct device *dev, struct device_attribute *attr, char *buf)
 		}
 		/* Last element in y-axis table is overflow */
 		elem = host->latency_y_axis_write[i];
-		pct = (elem * 100) / num_elem;
+		pct = div64_u64(elem * 100, num_elem);
 		bytes_written += scnprintf(buf + bytes_written,
 					   PAGE_SIZE - bytes_written,
 					   "\t> %5dms%15llu%15d%%\n", 10,
