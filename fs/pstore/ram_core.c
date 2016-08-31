@@ -15,52 +15,35 @@
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/errno.h>
-#include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/memblock.h>
+#include <linux/pstore_ram.h>
 #include <linux/rslib.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
 #include <linux/vmalloc.h>
-#include <linux/pstore_ram.h>
-#include <linux/spinlock.h>
 #include <asm/page.h>
 
 struct persistent_ram_buffer {
-	uint32_t sig;
-	size_t start;
-	size_t size;
-	uint8_t data[0];
+	uint32_t    sig;
+	atomic_t    start;
+	atomic_t    size;
+	uint8_t     data[0];
 };
-
-static DEFINE_SPINLOCK(buffer_lock);
 
 #define PERSISTENT_RAM_SIG (0x43474244) /* DBGC */
 
 static inline size_t buffer_size(struct persistent_ram_zone *prz)
 {
-	return prz->buffer->size;
+	return atomic_read(&prz->buffer->size);
 }
 
 static inline size_t buffer_start(struct persistent_ram_zone *prz)
 {
-	return prz->buffer->start;
-}
-
-static inline int compare_and_exchange(size_t *v, int old, int new)
-{
-	size_t ret;
-
-	spin_lock(&buffer_lock);
-
-	ret = *v;
-	if (likely(ret == old))
-		*v = new;
-
-	spin_unlock(&buffer_lock);
-
-	return ret;
+	return atomic_read(&prz->buffer->start);
 }
 
 /* increase and wrap the start pointer, returning the old value */
@@ -70,11 +53,11 @@ static inline size_t buffer_start_add(struct persistent_ram_zone *prz, size_t a)
 	int new;
 
 	do {
-		old = prz->buffer->start;
+		old = atomic_read(&prz->buffer->start);
 		new = old + a;
 		while (unlikely(new > prz->buffer_size))
 			new -= prz->buffer_size;
-	} while (compare_and_exchange(&prz->buffer->start, old, new) != old);
+	} while (atomic_cmpxchg(&prz->buffer->start, old, new) != old);
 
 	return old;
 }
@@ -85,15 +68,15 @@ static inline void buffer_size_add(struct persistent_ram_zone *prz, size_t a)
 	size_t old;
 	size_t new;
 
-	if (prz->buffer->size == prz->buffer_size)
+	if (atomic_read(&prz->buffer->size) == prz->buffer_size)
 		return;
 
 	do {
-		old = prz->buffer->size;
+		old = atomic_read(&prz->buffer->size);
 		new = old + a;
 		if (new > prz->buffer_size)
 			new = prz->buffer_size;
-	} while (compare_and_exchange(&prz->buffer->size, old, new) != old);
+	} while (atomic_cmpxchg(&prz->buffer->size, old, new) != old);
 }
 
 static void notrace persistent_ram_encode_rs8(struct persistent_ram_zone *prz,
@@ -274,6 +257,16 @@ static void notrace persistent_ram_update(struct persistent_ram_zone *prz,
 	persistent_ram_update_ecc(prz, start, count);
 }
 
+static int notrace persistent_ram_update_user(struct persistent_ram_zone *prz,
+	const void __user *s, unsigned int start, unsigned int count)
+{
+	struct persistent_ram_buffer *buffer = prz->buffer;
+	int ret = unlikely(__copy_from_user(buffer->data + start, s, count)) ?
+		-EFAULT : 0;
+	persistent_ram_update_ecc(prz, start, count);
+	return ret;
+}
+
 void persistent_ram_save_old(struct persistent_ram_zone *prz)
 {
 	struct persistent_ram_buffer *buffer = prz->buffer;
@@ -327,6 +320,38 @@ int notrace persistent_ram_write(struct persistent_ram_zone *prz,
 	return count;
 }
 
+int notrace persistent_ram_write_user(struct persistent_ram_zone *prz,
+	const void __user *s, unsigned int count)
+{
+	int rem, ret = 0, c = count;
+	size_t start;
+
+	if (unlikely(!access_ok(VERIFY_READ, s, count)))
+		return -EFAULT;
+	if (unlikely(c > prz->buffer_size)) {
+		s += c - prz->buffer_size;
+		c = prz->buffer_size;
+	}
+
+	buffer_size_add(prz, c);
+
+	start = buffer_start_add(prz, c);
+
+	rem = prz->buffer_size - start;
+	if (unlikely(rem < c)) {
+		ret = persistent_ram_update_user(prz, s, start, rem);
+		s += rem;
+		c -= rem;
+		start = 0;
+	}
+	if (likely(!ret))
+		ret = persistent_ram_update_user(prz, s, start, c);
+
+	persistent_ram_update_header_ecc(prz);
+
+	return unlikely(ret) ? ret : count;
+}
+
 size_t persistent_ram_old_size(struct persistent_ram_zone *prz)
 {
 	return prz->old_log_size;
@@ -346,8 +371,8 @@ void persistent_ram_free_old(struct persistent_ram_zone *prz)
 
 void persistent_ram_zap(struct persistent_ram_zone *prz)
 {
-	prz->buffer->start = 0;
-	prz->buffer->size = 0;
+	atomic_set(&prz->buffer->start, 0);
+	atomic_set(&prz->buffer->size, 0);
 	persistent_ram_update_header_ecc(prz);
 }
 
