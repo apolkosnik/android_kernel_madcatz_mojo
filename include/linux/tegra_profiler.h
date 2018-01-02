@@ -1,7 +1,7 @@
 /*
  * include/linux/tegra_profiler.h
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -19,8 +19,8 @@
 
 #include <linux/ioctl.h>
 
-#define QUADD_SAMPLES_VERSION	25
-#define QUADD_IO_VERSION	11
+#define QUADD_SAMPLES_VERSION	34
+#define QUADD_IO_VERSION	18
 
 #define QUADD_IO_VERSION_DYNAMIC_RB		5
 #define QUADD_IO_VERSION_RB_MAX_FILL_COUNT	6
@@ -29,6 +29,13 @@
 #define QUADD_IO_VERSION_GET_MMAP		9
 #define QUADD_IO_VERSION_BT_UNWIND_TABLES	10
 #define QUADD_IO_VERSION_UNWIND_MIXED		11
+#define QUADD_IO_VERSION_EXTABLES_MMAP		12
+#define QUADD_IO_VERSION_ARCH_TIMER_OPT		13
+#define QUADD_IO_VERSION_DATA_MMAP		14
+#define QUADD_IO_VERSION_BT_LOWER_BOUND		15
+#define QUADD_IO_VERSION_STACK_OFFSET		16
+#define QUADD_IO_VERSION_SECTIONS_INFO		17
+#define QUADD_IO_VERSION_UNW_METHODS_OPT	18
 
 #define QUADD_SAMPLE_VERSION_THUMB_MODE_FLAG	17
 #define QUADD_SAMPLE_VERSION_GROUP_SAMPLES	18
@@ -37,6 +44,17 @@
 #define QUADD_SAMPLE_VERSION_SUPPORT_IP64	23
 #define QUADD_SAMPLE_VERSION_SPECIAL_MMAP	24
 #define QUADD_SAMPLE_VERSION_UNWIND_MIXED	25
+#define QUADD_SAMPLE_VERSION_UNW_ENTRY_TYPE	26
+#define QUADD_SAMPLE_VERSION_USE_ARCH_TIMER	27
+#define QUADD_SAMPLE_VERSION_SCHED_SAMPLES	28
+#define QUADD_SAMPLE_VERSION_HDR_UNW_METHOD	29
+#define QUADD_SAMPLE_VERSION_HDR_ARCH_TIMER	30
+#define QUADD_SAMPLE_VERSION_STACK_OFFSET	31
+#define QUADD_SAMPLE_VERSION_SCHED_TASK_STATE	32
+#define QUADD_SAMPLE_VERSION_URCS		33
+#define QUADD_SAMPLE_VERSION_HOTPLUG		34
+
+#define QUADD_MMAP_HEADER_VERSION		1
 
 #define QUADD_MAX_COUNTERS	32
 #define QUADD_MAX_PROCESS	64
@@ -81,8 +99,19 @@
 
 /*
  * Send exception-handling tables info
+ * This ioctl is obsolete
  */
-#define IOCTL_SET_EXTAB _IOW(QUADD_IOCTL, 6, struct quadd_extables)
+/*#define IOCTL_SET_EXTAB _IOW(QUADD_IOCTL, 6, struct quadd_extables)*/
+
+/*
+ * Send ring buffer mmap info
+ */
+#define IOCTL_SET_MMAP_RB _IOW(QUADD_IOCTL, 7, struct quadd_mmap_rb_info)
+
+/*
+ * Send sections info
+ */
+#define IOCTL_SET_SECTIONS_INFO _IOW(QUADD_IOCTL, 8, struct quadd_sections)
 
 #define QUADD_CPUMODE_TEGRA_POWER_CLUSTER_LP	(1 << 29)	/* LP CPU */
 #define QUADD_CPUMODE_THUMB			(1 << 30)	/* thumb mode */
@@ -123,6 +152,8 @@ enum quadd_record_type {
 	QUADD_RECORD_TYPE_HEADER,
 	QUADD_RECORD_TYPE_POWER_RATE,
 	QUADD_RECORD_TYPE_ADDITIONAL_SAMPLE,
+	QUADD_RECORD_TYPE_SCHED,
+	QUADD_RECORD_TYPE_HOTPLUG,
 };
 
 enum quadd_event_source {
@@ -138,17 +169,13 @@ enum quadd_cpu_mode {
 
 #pragma pack(push, 1)
 
-#define QUADD_SAMPLE_UNW_METHOD_SHIFT	0
-#define QUADD_SAMPLE_UNW_METHOD_MASK	(1 << QUADD_SAMPLE_UNW_METHOD_SHIFT)
+#define QUADD_SAMPLE_RES_URCS_ENABLED	(1 << 0)
 
-enum {
-	QUADD_UNW_METHOD_FP = 0,
-	QUADD_UNW_METHOD_EHT,
-	QUADD_UNW_METHOD_MIXED,
-};
+#define QUADD_SAMPLE_URC_MASK		0xff
 
-#define QUADD_SAMPLE_URC_SHIFT		1
-#define QUADD_SAMPLE_URC_MASK		(0x0f << QUADD_SAMPLE_URC_SHIFT)
+#define QUADD_SAMPLE_URC_SHIFT_FP	0
+#define QUADD_SAMPLE_URC_SHIFT_UT	(1 * 8)
+#define QUADD_SAMPLE_URC_SHIFT_DWARF	(2 * 8)
 
 enum {
 	QUADD_URC_SUCCESS = 0,
@@ -164,12 +191,28 @@ enum {
 	QUADD_URC_SPARE_ENCODING,
 	QUADD_URC_UNSUPPORTED_PR,
 	QUADD_URC_PC_INCORRECT,
+	QUADD_URC_LEVEL_TOO_DEEP,
+	QUADD_URC_FP_INCORRECT,
+	QUADD_URC_NONE,
+	QUADD_URC_UNWIND_MISMATCH,
+	QUADD_URC_TBL_LINK_INCORRECT,
+	QUADD_URC_MAX,
 };
 
 #define QUADD_SED_IP64			(1 << 0)
 
-#define QUADD_SED_UNW_METHOD_SHIFT	1
-#define QUADD_SED_UNW_METHOD_MASK	(0x07 << QUADD_SED_UNW_METHOD_SHIFT)
+#define QUADD_SED_STACK_OFFSET_SHIFT	1
+#define QUADD_SED_STACK_OFFSET_MASK	(0xffff << QUADD_SED_STACK_OFFSET_SHIFT)
+
+enum {
+	QUADD_UNW_TYPE_FP = 0,
+	QUADD_UNW_TYPE_UT,
+	QUADD_UNW_TYPE_LR_FP,
+	QUADD_UNW_TYPE_LR_UT,
+	QUADD_UNW_TYPE_KCTX,
+	QUADD_UNW_TYPE_DWARF_EH,
+	QUADD_UNW_TYPE_DWARF_DF,
+};
 
 struct quadd_sample_data {
 	u64 ip;
@@ -217,11 +260,36 @@ struct quadd_power_rate_data {
 	u32 emc;
 };
 
+struct quadd_hotplug_data {
+	u64 time;
+	u32 cpu;
+
+	u32 is_online:1,
+	    reserved:31;
+};
+
 struct quadd_additional_sample {
 	u8 type;
 
 	u32 values[6];
 	u16 extra_length;
+};
+
+enum {
+	QUADD_SCHED_IDX_TASK_STATE = 0,
+	QUADD_SCHED_IDX_RESERVED,
+};
+
+struct quadd_sched_data {
+	u32 pid;
+	u64 time;
+
+	u32	cpu:6,
+		lp_mode:1,
+		sched_in:1,
+		reserved:24;
+
+	u32 data[2];
 };
 
 enum {
@@ -257,6 +325,13 @@ struct quadd_debug_data {
 
 #define QUADD_HEADER_MAGIC	0x1122
 
+#define QUADD_HDR_BT_FP			(1 << 0)
+#define QUADD_HDR_BT_UT			(1 << 1)
+#define QUADD_HDR_BT_UT_CE		(1 << 2)
+#define QUADD_HDR_USE_ARCH_TIMER	(1 << 3)
+#define QUADD_HDR_STACK_OFFSET		(1 << 4)
+#define QUADD_HDR_BT_DWARF		(1 << 5)
+
 struct quadd_header_data {
 	u16 magic;
 	u16 version;
@@ -288,6 +363,8 @@ struct quadd_record_data {
 		struct quadd_debug_data		debug;
 		struct quadd_header_data	hdr;
 		struct quadd_power_rate_data	power_rate;
+		struct quadd_hotplug_data	hotplug;
+		struct quadd_sched_data		sched;
 		struct quadd_additional_sample	additional_sample;
 	};
 } __aligned(4);
@@ -299,12 +376,17 @@ struct quadd_record_data {
 enum {
 	QUADD_PARAM_IDX_SIZE_OF_RB	= 0,
 	QUADD_PARAM_IDX_EXTRA		= 1,
+	QUADD_PARAM_IDX_BT_LOWER_BOUND	= 2,
 };
 
 #define QUADD_PARAM_EXTRA_GET_MMAP		(1 << 0)
 #define QUADD_PARAM_EXTRA_BT_FP			(1 << 1)
-#define QUADD_PARAM_EXTRA_BT_UNWIND_TABLES	(1 << 2)
+#define QUADD_PARAM_EXTRA_BT_UT			(1 << 2)
 #define QUADD_PARAM_EXTRA_BT_MIXED		(1 << 3)
+#define QUADD_PARAM_EXTRA_USE_ARCH_TIMER	(1 << 4)
+#define QUADD_PARAM_EXTRA_STACK_OFFSET		(1 << 5)
+#define QUADD_PARAM_EXTRA_BT_UT_CE		(1 << 6)
+#define QUADD_PARAM_EXTRA_BT_DWARF		(1 << 7)
 
 struct quadd_parameters {
 	u32 freq;
@@ -354,6 +436,9 @@ enum {
 #define QUADD_COMM_CAP_EXTRA_SUPPORT_AARCH64	(1 << 4)
 #define QUADD_COMM_CAP_EXTRA_SPECIAL_ARCH_MMAP	(1 << 5)
 #define QUADD_COMM_CAP_EXTRA_UNWIND_MIXED	(1 << 6)
+#define QUADD_COMM_CAP_EXTRA_UNW_ENTRY_TYPE	(1 << 7)
+#define QUADD_COMM_CAP_EXTRA_ARCH_TIMER		(1 << 8)
+#define QUADD_COMM_CAP_EXTRA_RB_MMAP_OP		(1 << 9)
 
 struct quadd_comm_cap {
 	u32	pmu:1,
@@ -396,20 +481,76 @@ struct quadd_module_version {
 	u32 reserved[4];	/* reserved fields for future extensions */
 };
 
+enum {
+	QUADD_SEC_TYPE_EXTAB = 0,
+	QUADD_SEC_TYPE_EXIDX,
+
+	QUADD_SEC_TYPE_EH_FRAME,
+	QUADD_SEC_TYPE_EH_FRAME_HDR,
+
+	QUADD_SEC_TYPE_DEBUG_FRAME,
+	QUADD_SEC_TYPE_DEBUG_FRAME_HDR,
+
+	QUADD_SEC_TYPE_MAX,
+};
+
 struct quadd_sec_info {
 	u64 addr;
 	u64 length;
+
+	u64 mmap_offset;
 };
 
-struct quadd_extables {
+struct quadd_sections {
 	u64 vm_start;
 	u64 vm_end;
 
-	struct quadd_sec_info extab;
-	struct quadd_sec_info exidx;
+	struct quadd_sec_info sec[QUADD_SEC_TYPE_MAX];
+
+	u64 user_mmap_start;
+
+	u64 reserved[4];	/* reserved fields for future extensions */
+};
+
+struct quadd_mmap_rb_info {
+	u32 cpu_id;
+
+	u64 vm_start;
+	u64 vm_end;
 
 	u32 reserved[4];	/* reserved fields for future extensions */
 };
+
+#define QUADD_MMAP_HEADER_MAGIC		0x33445566
+
+struct quadd_mmap_header {
+	u32 magic;
+	u32 version;
+
+	u32 cpu_id;
+	u32 samples_version;
+
+	u32 reserved[4];	/* reserved fields for future extensions */
+} __aligned(8);
+
+enum {
+	QUADD_RB_STATE_NONE = 0,
+	QUADD_RB_STATE_ACTIVE,
+	QUADD_RB_STATE_STOPPED,
+};
+
+struct quadd_ring_buffer_hdr {
+	u32 state;
+	u32 size;
+
+	u32 pos_read;
+	u32 pos_write;
+
+	u32 max_fill_count;
+	u32 skipped_samples;
+
+	u32 reserved[4];	/* reserved fields for future extensions */
+} __aligned(8);
 
 #pragma pack(pop)
 

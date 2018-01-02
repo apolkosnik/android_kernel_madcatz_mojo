@@ -1,7 +1,7 @@
 /*
  * drivers/misc/tegra-profiler/armv8_events.h
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -22,13 +22,14 @@
 #define QUADD_AA64_CPU_IMP_NVIDIA	'N'
 
 #define QUADD_AA64_CPU_IDCODE_CORTEX_A57	0x01
-
+#define QUADD_AA64_CPU_IDCODE_CORTEX_A53	0x03
 
 enum {
 	QUADD_AA64_CPU_TYPE_UNKNOWN = 1,
-	QUADD_AA64_CPU_TYPE_ARM,
-	QUADD_AA64_CPU_TYPE_CORTEX_A57,
 	QUADD_AA64_CPU_TYPE_UNKNOWN_IMP,
+	QUADD_AA64_CPU_TYPE_ARM,
+	QUADD_AA64_CPU_TYPE_CORTEX_A53,
+	QUADD_AA64_CPU_TYPE_CORTEX_A57,
 	QUADD_AA64_CPU_TYPE_DENVER,
 };
 
@@ -52,11 +53,11 @@ enum {
 #define QUADD_ARMV8_PMCR_LC		(1 << 6)
 
 /* Number of event counters */
-#define	QUADD_ARMV8_PMCR_N_SHIFT	16
+#define	QUADD_ARMV8_PMCR_N_SHIFT	11
 #define	QUADD_ARMV8_PMCR_N_MASK		0x1f
 
 /* Identification code */
-#define	QUADD_ARMV8_PMCR_IDCODE_SHIFT	11
+#define	QUADD_ARMV8_PMCR_IDCODE_SHIFT	16
 #define	QUADD_ARMV8_PMCR_IDCODE_MASK	0xff
 
 /* Implementer code */
@@ -80,6 +81,9 @@ enum {
 #define QUADD_ARMV8_EVTSEL_MASK		0xff
 
 #define QUADD_ARMV8_COUNTERS_MASK_PMUV3	0x3f
+
+#define QUADD_ARMV8_PMU_NVEXT_SHIFT	4
+#define QUADD_ARMV8_PMU_NVEXT_MASK	0x0f
 
 /*
  * ARMv8 PMUv3 Performance Events handling code.
@@ -123,6 +127,16 @@ enum {
 	QUADD_ARMV8_HW_EVENT_BUS_ACCESS				= 0x19,
 	QUADD_ARMV8_HW_EVENT_MEM_ERROR				= 0x1A,
 	QUADD_ARMV8_HW_EVENT_BUS_CYCLES				= 0x1D,
+};
+
+/*
+ * ARMv8 Cortex-A57 specific event types.
+ */
+enum {
+	QUADD_ARMV8_A57_HW_EVENT_L1D_CACHE_REFILL_LD	= 0x42,
+	QUADD_ARMV8_A57_HW_EVENT_L1D_CACHE_REFILL_ST	= 0x43,
+	QUADD_ARMV8_A57_HW_EVENT_L2D_CACHE_REFILL_LD	= 0x52,
+	QUADD_ARMV8_A57_HW_EVENT_L2D_CACHE_REFILL_ST	= 0x53,
 };
 
 #define QUADD_ARMV8_UNSUPPORTED_EVENT	0xff00

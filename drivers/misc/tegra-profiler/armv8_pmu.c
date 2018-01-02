@@ -1,7 +1,7 @@
 /*
  * drivers/misc/tegra-profiler/armv8_pmu.c
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -50,7 +50,60 @@ static DEFINE_PER_CPU(struct quadd_pmu_info, cpu_pmu_info);
 
 static struct quadd_pmu_ctx pmu_ctx;
 
-static unsigned quadd_armv8_pmuv3_events_map[QUADD_EVENT_TYPE_MAX] = {
+static unsigned
+quadd_armv8_pmuv3_arm_events_map[QUADD_EVENT_TYPE_MAX] = {
+	[QUADD_EVENT_TYPE_INSTRUCTIONS] =
+		QUADD_ARMV8_HW_EVENT_INSTR_EXECUTED,
+	[QUADD_EVENT_TYPE_BRANCH_INSTRUCTIONS] =
+		QUADD_ARMV8_UNSUPPORTED_EVENT,
+	[QUADD_EVENT_TYPE_BRANCH_MISSES] =
+		QUADD_ARMV8_HW_EVENT_PC_BRANCH_MIS_PRED,
+	[QUADD_EVENT_TYPE_BUS_CYCLES] =
+		QUADD_ARMV8_UNSUPPORTED_EVENT,
+
+	[QUADD_EVENT_TYPE_L1_DCACHE_READ_MISSES] =
+		QUADD_ARMV8_HW_EVENT_L1_DCACHE_REFILL,
+	[QUADD_EVENT_TYPE_L1_DCACHE_WRITE_MISSES] =
+		QUADD_ARMV8_HW_EVENT_L1_DCACHE_REFILL,
+	[QUADD_EVENT_TYPE_L1_ICACHE_MISSES] =
+		QUADD_ARMV8_HW_EVENT_L1_ICACHE_REFILL,
+
+	[QUADD_EVENT_TYPE_L2_DCACHE_READ_MISSES] =
+		QUADD_ARMV8_HW_EVENT_L2_CACHE_REFILL,
+	[QUADD_EVENT_TYPE_L2_DCACHE_WRITE_MISSES] =
+		QUADD_ARMV8_HW_EVENT_L2_CACHE_REFILL,
+	[QUADD_EVENT_TYPE_L2_ICACHE_MISSES] =
+		QUADD_ARMV8_UNSUPPORTED_EVENT,
+};
+
+static unsigned
+quadd_armv8_pmuv3_a57_events_map[QUADD_EVENT_TYPE_MAX] = {
+	[QUADD_EVENT_TYPE_INSTRUCTIONS] =
+		QUADD_ARMV8_HW_EVENT_INSTR_EXECUTED,
+	[QUADD_EVENT_TYPE_BRANCH_INSTRUCTIONS] =
+		QUADD_ARMV8_UNSUPPORTED_EVENT,
+	[QUADD_EVENT_TYPE_BRANCH_MISSES] =
+		QUADD_ARMV8_HW_EVENT_PC_BRANCH_MIS_PRED,
+	[QUADD_EVENT_TYPE_BUS_CYCLES] =
+		QUADD_ARMV8_UNSUPPORTED_EVENT,
+
+	[QUADD_EVENT_TYPE_L1_DCACHE_READ_MISSES] =
+		QUADD_ARMV8_A57_HW_EVENT_L1D_CACHE_REFILL_LD,
+	[QUADD_EVENT_TYPE_L1_DCACHE_WRITE_MISSES] =
+		QUADD_ARMV8_A57_HW_EVENT_L1D_CACHE_REFILL_ST,
+	[QUADD_EVENT_TYPE_L1_ICACHE_MISSES] =
+		QUADD_ARMV8_HW_EVENT_L1_ICACHE_REFILL,
+
+	[QUADD_EVENT_TYPE_L2_DCACHE_READ_MISSES] =
+		QUADD_ARMV8_A57_HW_EVENT_L2D_CACHE_REFILL_LD,
+	[QUADD_EVENT_TYPE_L2_DCACHE_WRITE_MISSES] =
+		QUADD_ARMV8_A57_HW_EVENT_L2D_CACHE_REFILL_ST,
+	[QUADD_EVENT_TYPE_L2_ICACHE_MISSES] =
+		QUADD_ARMV8_UNSUPPORTED_EVENT,
+};
+
+static unsigned
+quadd_armv8_pmuv3_denver_events_map[QUADD_EVENT_TYPE_MAX] = {
 	[QUADD_EVENT_TYPE_INSTRUCTIONS] =
 		QUADD_ARMV8_HW_EVENT_INSTR_EXECUTED,
 	[QUADD_EVENT_TYPE_BRANCH_INSTRUCTIONS] =
@@ -219,9 +272,15 @@ armv8_pmu_pmovsclr_write(int idx)
 	asm volatile("msr pmovsclr_el0, %0" : : "r" (BIT(idx)));
 }
 
-/*********************************************************************/
+static inline u32
+armv8_id_afr0_el1_read(void)
+{
+	u32 val;
 
-
+	/* Read Auxiliary Feature Register 0 */
+	asm volatile("mrs %0, id_afr0_el1" : "=r" (val));
+	return val;
+}
 
 static void enable_counter(int idx)
 {
@@ -710,7 +769,10 @@ static int get_current_events(int *events, int max_events)
 	return i;
 }
 
-/*********************************************************************/
+static struct quadd_arch_info *get_arch(void)
+{
+	return &pmu_ctx.arch;
+}
 
 static struct quadd_event_source_interface pmu_armv8_int = {
 	.enable			= pmu_enable,
@@ -727,6 +789,7 @@ static struct quadd_event_source_interface pmu_armv8_int = {
 	.set_events		= set_events,
 	.get_supported_events	= get_supported_events,
 	.get_current_events	= get_current_events,
+	.get_arch		= get_arch,
 };
 
 struct quadd_event_source_interface *quadd_armv8_pmu_init(void)
@@ -737,14 +800,21 @@ struct quadd_event_source_interface *quadd_armv8_pmu_init(void)
 	u64 aa64_dfr = read_cpuid(ID_AA64DFR0_EL1);
 	aa64_dfr = (aa64_dfr >> 8) & 0x0f;
 
-	pmu_ctx.arch = QUADD_AA64_CPU_TYPE_UNKNOWN;
+	strncpy(pmu_ctx.arch.name, "Unknown", sizeof(pmu_ctx.arch.name));
+	pmu_ctx.arch.type = QUADD_AA64_CPU_TYPE_UNKNOWN;
+	pmu_ctx.arch.ver = 0;
+	pmu_ctx.current_map = NULL;
 
 	switch (aa64_dfr) {
 	case QUADD_AA64_PMUVER_PMUV3:
-		strcpy(pmu_ctx.arch_name, "AA64 PmuV3");
+		strncpy(pmu_ctx.arch.name, "AA64 PmuV3",
+			sizeof(pmu_ctx.arch.name));
+		pmu_ctx.arch.name[sizeof(pmu_ctx.arch.name) - 1] = '\0';
+
 		pmu_ctx.counters_mask =
 			QUADD_ARMV8_COUNTERS_MASK_PMUV3;
-		pmu_ctx.current_map = quadd_armv8_pmuv3_events_map;
+		pmu_ctx.current_map =
+			quadd_armv8_pmuv3_arm_events_map;
 
 		pmcr = armv8_pmu_pmcr_read();
 
@@ -755,19 +825,48 @@ struct quadd_event_source_interface *quadd_armv8_pmu_init(void)
 		pr_info("imp: %#x, idcode: %#x\n", imp, idcode);
 
 		if (imp == ARM_CPU_IMP_ARM) {
-			strcat(pmu_ctx.arch_name, " ARM");
-			if (idcode == QUADD_AA64_CPU_IDCODE_CORTEX_A57) {
-				pmu_ctx.arch = QUADD_AA64_CPU_TYPE_CORTEX_A57;
-				strcat(pmu_ctx.arch_name, " CORTEX_A57");
+			strncat(pmu_ctx.arch.name, " ARM",
+				sizeof(pmu_ctx.arch.name) -
+				strlen(pmu_ctx.arch.name));
+			pmu_ctx.arch.name[sizeof(pmu_ctx.arch.name) - 1] = '\0';
+
+			if (idcode == QUADD_AA64_CPU_IDCODE_CORTEX_A53) {
+				pmu_ctx.arch.type =
+					QUADD_AA64_CPU_TYPE_CORTEX_A53;
+
+				strncat(pmu_ctx.arch.name, " CORTEX-A53",
+					sizeof(pmu_ctx.arch.name) -
+					strlen(pmu_ctx.arch.name));
+			} else if (idcode == QUADD_AA64_CPU_IDCODE_CORTEX_A57) {
+				pmu_ctx.arch.type =
+					QUADD_AA64_CPU_TYPE_CORTEX_A57;
+				pmu_ctx.current_map =
+					quadd_armv8_pmuv3_a57_events_map;
+
+				strncat(pmu_ctx.arch.name, " CORTEX-A57",
+					sizeof(pmu_ctx.arch.name) -
+					strlen(pmu_ctx.arch.name));
 			} else {
-				pmu_ctx.arch = QUADD_AA64_CPU_TYPE_ARM;
+				pmu_ctx.arch.type = QUADD_AA64_CPU_TYPE_ARM;
 			}
 		} else if (imp == QUADD_AA64_CPU_IMP_NVIDIA) {
-			strcat(pmu_ctx.arch_name, " Nvidia");
-			pmu_ctx.arch = QUADD_AA64_CPU_TYPE_DENVER;
+			u32 ext_ver = armv8_id_afr0_el1_read();
+			ext_ver = (ext_ver >> QUADD_ARMV8_PMU_NVEXT_SHIFT) &
+				  QUADD_ARMV8_PMU_NVEXT_MASK;
+
+			strncat(pmu_ctx.arch.name, " NVIDIA (Denver)",
+				sizeof(pmu_ctx.arch.name) -
+				strlen(pmu_ctx.arch.name));
+
+			pmu_ctx.arch.type = QUADD_AA64_CPU_TYPE_DENVER;
+			pmu_ctx.arch.ver = ext_ver;
+			pmu_ctx.current_map =
+				quadd_armv8_pmuv3_denver_events_map;
 		} else {
-			strcat(pmu_ctx.arch_name, " Unknown");
-			pmu_ctx.arch = QUADD_AA64_CPU_TYPE_UNKNOWN_IMP;
+			strncat(pmu_ctx.arch.name, " Unknown implementor code",
+				sizeof(pmu_ctx.arch.name) -
+				strlen(pmu_ctx.arch.name));
+			pmu_ctx.arch.type = QUADD_AA64_CPU_TYPE_UNKNOWN_IMP;
 		}
 
 		pmu = &pmu_armv8_int;
@@ -780,7 +879,9 @@ struct quadd_event_source_interface *quadd_armv8_pmu_init(void)
 
 	INIT_LIST_HEAD(&pmu_ctx.used_events);
 
-	pr_info("arch: %s\n", pmu_ctx.arch_name);
+	pmu_ctx.arch.name[sizeof(pmu_ctx.arch.name) - 1] = '\0';
+	pr_info("arch: %s, type: %d, ver: %d\n",
+		pmu_ctx.arch.name, pmu_ctx.arch.type, pmu_ctx.arch.ver);
 
 	return pmu;
 }

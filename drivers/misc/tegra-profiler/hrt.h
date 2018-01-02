@@ -1,7 +1,7 @@
 /*
  * drivers/misc/tegra-profiler/hrt.h
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -39,24 +39,33 @@ struct quadd_cpu_context {
 	atomic_t nr_active;
 };
 
+struct timecounter;
+
 struct quadd_hrt_ctx {
-	struct quadd_cpu_context * __percpu cpu_ctx;
+	struct quadd_cpu_context __percpu *cpu_ctx;
+
 	u64 sample_period;
+	unsigned long low_addr;
 
 	struct quadd_ctx *quadd_ctx;
 
-	int active;
-	atomic64_t counter_samples;
+	atomic_t active;
 	atomic_t nr_active_all_core;
+
+	atomic64_t counter_samples;
+	atomic64_t skipped_samples;
 
 	struct timer_list ma_timer;
 	unsigned int ma_period;
 
 	unsigned long vm_size_prev;
 	unsigned long rss_size_prev;
+
+	struct quadd_unw_methods um;
+	int get_stack_offset;
 };
 
-#define QUADD_HRT_MIN_FREQ	110
+#define QUADD_HRT_MIN_FREQ	100
 
 #define QUADD_U32_MAX (~(__u32)0)
 
@@ -71,8 +80,12 @@ void quadd_hrt_deinit(void);
 int quadd_hrt_start(void);
 void quadd_hrt_stop(void);
 
-void quadd_put_sample(struct quadd_record_data *data,
-		      struct quadd_iovec *vec, int vec_count);
+void
+quadd_put_sample_this_cpu(struct quadd_record_data *data,
+			  struct quadd_iovec *vec, int vec_count);
+void
+quadd_put_sample(struct quadd_record_data *data,
+		 struct quadd_iovec *vec, int vec_count);
 
 void quadd_hrt_get_state(struct quadd_module_state *state);
 u64 quadd_get_time(void);

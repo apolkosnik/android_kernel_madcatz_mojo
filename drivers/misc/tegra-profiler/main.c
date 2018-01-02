@@ -1,7 +1,7 @@
 /*
  * drivers/misc/tegra-profiler/main.c
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -86,11 +86,13 @@ static int start(void)
 	}
 
 	if (!atomic_cmpxchg(&ctx.started, 0, 1)) {
+		preempt_disable();
+
 		if (ctx.pmu) {
 			err = ctx.pmu->enable();
 			if (err) {
 				pr_err("error: pmu enable\n");
-				goto errout;
+				goto errout_preempt;
 			}
 		}
 
@@ -98,41 +100,48 @@ static int start(void)
 			err = ctx.pl310->enable();
 			if (err) {
 				pr_err("error: pl310 enable\n");
-				goto errout;
+				goto errout_preempt;
 			}
 		}
 
 		ctx.comm->reset();
+
+		err = quadd_hrt_start();
+		if (err) {
+			pr_err("error: hrt start\n");
+			goto errout_preempt;
+		}
+
+		preempt_enable();
 
 		err = quadd_power_clk_start();
 		if (err < 0) {
 			pr_err("error: power_clk start\n");
 			goto errout;
 		}
-
-		err = quadd_hrt_start();
-		if (err) {
-			pr_err("error: hrt start\n");
-			goto errout;
-		}
 	}
 
 	return 0;
 
+errout_preempt:
+	preempt_enable();
+
 errout:
 	atomic_set(&ctx.started, 0);
 	tegra_profiler_unlock();
+
 	return err;
 }
 
 static void stop(void)
 {
 	if (atomic_cmpxchg(&ctx.started, 1, 0)) {
+		preempt_disable();
+
 		quadd_hrt_stop();
 
 		ctx.comm->reset();
 
-		quadd_power_clk_stop();
 		quadd_unwind_stop();
 
 		if (ctx.pmu)
@@ -142,6 +151,10 @@ static void stop(void)
 			ctx.pl310->disable();
 
 		tegra_profiler_unlock();
+
+		preempt_enable();
+
+		quadd_power_clk_stop();
 	}
 }
 
@@ -158,67 +171,71 @@ static inline int is_event_supported(struct source_info *si, int event)
 	return 0;
 }
 
-static int set_parameters(struct quadd_parameters *p, uid_t *debug_app_uid)
+static int
+validate_freq(unsigned int freq)
 {
-	int i, err;
+	return freq >= 100 && freq <= 100000;
+}
+
+static int
+set_parameters(struct quadd_parameters *p)
+{
+	int i, err, uid = 0;
+	uid_t task_uid, current_uid;
 	int pmu_events_id[QUADD_MAX_COUNTERS];
 	int pl310_events_id;
 	int nr_pmu = 0, nr_pl310 = 0;
-	int uid = 0;
 	struct task_struct *task;
-	unsigned int extra;
+	u64 *low_addr_p;
 
-	if (ctx.param.freq != 100 && ctx.param.freq != 1000 &&
-	    ctx.param.freq != 10000)
+	if (!validate_freq(p->freq)) {
+		pr_err("error: incorrect frequency: %u\n", p->freq);
 		return -EINVAL;
-
-	ctx.param.freq = p->freq;
-	ctx.param.ma_freq = p->ma_freq;
-	ctx.param.backtrace = p->backtrace;
-	ctx.param.use_freq = p->use_freq;
-	ctx.param.system_wide = p->system_wide;
-	ctx.param.power_rate_freq = p->power_rate_freq;
-	ctx.param.debug_samples = p->debug_samples;
-
-	for (i = 0; i < ARRAY_SIZE(p->reserved); i++)
-		ctx.param.reserved[i] = p->reserved[i];
+	}
 
 	/* Currently only one process */
 	if (p->nr_pids != 1)
 		return -EINVAL;
 
+	p->package_name[sizeof(p->package_name) - 1] = '\0';
+
+	ctx.param = *p;
+
 	rcu_read_lock();
 	task = pid_task(find_vpid(p->pids[0]), PIDTYPE_PID);
 	rcu_read_unlock();
 	if (!task) {
-		pr_err("Process not found: %u\n", p->pids[0]);
+		pr_err("error: process not found: %u\n", p->pids[0]);
 		return -ESRCH;
 	}
 
-	pr_info("owner/task uids: %u/%u\n", current_fsuid(), task_uid(task));
+	current_uid = current_fsuid();
+	task_uid = task_uid(task);
+	pr_info("owner/task uids: %u/%u\n", current_uid, task_uid);
+
 	if (!capable(CAP_SYS_ADMIN)) {
-		if (current_fsuid() != task_uid(task)) {
+		if (current_uid != task_uid) {
+			pr_info("package: %s\n", p->package_name);
+
 			uid = quadd_auth_is_debuggable((char *)p->package_name);
 			if (uid < 0) {
-				pr_err("Error: QuadD security service\n");
+				pr_err("error: tegra profiler security service\n");
 				return uid;
 			} else if (uid == 0) {
-				pr_err("Error: app is not debuggable\n");
+				pr_err("error: app is not debuggable\n");
 				return -EACCES;
 			}
+			pr_info("app is debuggable, uid: %u\n", uid);
 
-			*debug_app_uid = uid;
-			pr_info("debug_app_uid: %u\n", uid);
+			if (task_uid != uid) {
+				pr_err("error: uids are not matched\n");
+				return -EACCES;
+			}
 		}
 		ctx.collect_kernel_ips = 0;
 	} else {
 		ctx.collect_kernel_ips = 1;
 	}
-
-	for (i = 0; i < p->nr_pids; i++)
-		ctx.param.pids[i] = p->pids[i];
-
-	ctx.param.nr_pids = p->nr_pids;
 
 	for (i = 0; i < p->nr_events; i++) {
 		int event = p->events[i];
@@ -276,15 +293,13 @@ static int set_parameters(struct quadd_parameters *p, uid_t *debug_app_uid)
 		}
 	}
 
-	extra = p->reserved[QUADD_PARAM_IDX_EXTRA];
+	low_addr_p = (u64 *)&p->reserved[QUADD_PARAM_IDX_BT_LOWER_BOUND];
+	ctx.hrt->low_addr = (unsigned long)*low_addr_p;
+	pr_info("bt lower bound: %#lx\n", ctx.hrt->low_addr);
 
-	if (extra & QUADD_PARAM_EXTRA_BT_UNWIND_TABLES)
-		pr_info("unwinding: exception-handling tables\n");
-
-	if (extra & QUADD_PARAM_EXTRA_BT_FP)
-		pr_info("unwinding: frame pointers\n");
-
-	quadd_unwind_start(task);
+	err = quadd_unwind_start(task);
+	if (err)
+		return err;
 
 	pr_info("New parameters have been applied\n");
 
@@ -416,6 +431,8 @@ static void get_capabilities(struct quadd_comm_cap *cap)
 	extra |= QUADD_COMM_CAP_EXTRA_SUPPORT_AARCH64;
 	extra |= QUADD_COMM_CAP_EXTRA_SPECIAL_ARCH_MMAP;
 	extra |= QUADD_COMM_CAP_EXTRA_UNWIND_MIXED;
+	extra |= QUADD_COMM_CAP_EXTRA_UNW_ENTRY_TYPE;
+	extra |= QUADD_COMM_CAP_EXTRA_RB_MMAP_OP;
 
 	cap->reserved[QUADD_COMM_CAP_IDX_EXTRA] = extra;
 }
@@ -436,9 +453,16 @@ void quadd_get_state(struct quadd_module_state *state)
 }
 
 static int
-set_extab(struct quadd_extables *extabs)
+set_extab(struct quadd_sections *extabs,
+	  struct quadd_mmap_area *mmap)
 {
-	return quadd_unwind_set_extab(extabs);
+	return quadd_unwind_set_extab(extabs, mmap);
+}
+
+static void
+delete_mmap(struct quadd_mmap_area *mmap)
+{
+	quadd_unwind_delete_mmap(mmap);
 }
 
 static struct quadd_comm_control_interface control = {
@@ -448,6 +472,7 @@ static struct quadd_comm_control_interface control = {
 	.get_capabilities	= get_capabilities,
 	.get_state		= quadd_get_state,
 	.set_extab		= set_extab,
+	.delete_mmap		= delete_mmap,
 };
 
 static int __init quadd_module_init(void)
@@ -486,11 +511,11 @@ static int __init quadd_module_init(void)
 							  QUADD_MAX_COUNTERS);
 		ctx.pmu_info.nr_supported_events = nr_events;
 
-		pr_info("PMU: amount of events: %d\n", nr_events);
+		pr_debug("PMU: amount of events: %d\n", nr_events);
 
 		for (i = 0; i < nr_events; i++)
-			pr_info("PMU event: %s\n",
-				quadd_get_event_str(events[i]));
+			pr_debug("PMU event: %s\n",
+				 quadd_get_event_str(events[i]));
 	}
 
 #ifdef CONFIG_CACHE_L2X0
@@ -511,7 +536,7 @@ static int __init quadd_module_init(void)
 			pr_info("pl310 event: %s\n",
 				quadd_get_event_str(events[i]));
 	} else {
-		pr_info("PL310 not found\n");
+		pr_debug("PL310 not found\n");
 	}
 
 	ctx.hrt = quadd_hrt_init(&ctx);

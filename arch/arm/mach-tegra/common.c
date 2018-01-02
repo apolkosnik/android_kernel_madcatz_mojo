@@ -1379,6 +1379,7 @@ __setup("pmic_rst_reason=", tegra_pmic_rst_reason);
 
 #ifdef CONFIG_ANDROID
 static bool androidboot_mode_charger;
+static bool androidkernel_type_recovery;
 
 bool get_androidboot_mode_charger(void)
 {
@@ -1393,6 +1394,20 @@ static int __init tegra_androidboot_mode(char *options)
 	return 1;
 }
 __setup("androidboot.mode=", tegra_androidboot_mode);
+
+bool get_androidkernel_type_recovery(void)
+{
+	return androidkernel_type_recovery;
+}
+static int __init tegra_androidkernel_type(char *options)
+{
+	if (!strcmp(options, "recovery"))
+		androidkernel_type_recovery = true;
+	else
+		androidkernel_type_recovery = false;
+	return 1;
+}
+__setup("android.kerneltype=", tegra_androidkernel_type);
 #endif
 
 /*
@@ -1692,23 +1707,11 @@ static struct persistent_ram ram = {
 
 void __init tegra_ram_console_debug_reserve(unsigned long ram_console_size)
 {
-#ifdef CONFIG_KEXEC_HARDBOOT
-	phys_addr_t start;
-#endif
 	int ret;
 
 	ram.start = memblock_end_of_DRAM() - ram_console_size;
 	ram.size = ram_console_size;
 	ram.descs->size = ram_console_size;
-
-#ifdef CONFIG_KEXEC_HARDBOOT
-	// Reserve space for hardboot page, just before the ram_console
-	start = ram.start- SZ_1M;
-	if(!memblock_remove(start, SZ_1M))
-		pr_info("Hardboot page reserved at 0x%X\n", start);
-	else
-		pr_err("Failed to reserve space for hardboot page at 0x%X!\n", start);
-#endif
 
 	INIT_LIST_HEAD(&ram.node);
 

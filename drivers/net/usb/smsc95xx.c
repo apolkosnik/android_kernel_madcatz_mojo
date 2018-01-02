@@ -1,7 +1,7 @@
  /***************************************************************************
  *
  * Copyright (C) 2007-2008 SMSC
- *
+ * Copyright (c) 2012, NVIDIA CORPORATION.  All rights reserved.
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
@@ -87,8 +87,10 @@ static bool turbo_mode = true;
 module_param(turbo_mode, bool, 0644);
 MODULE_PARM_DESC(turbo_mode, "Enable multiple frames per Rx transaction");
 
-static char *mac_addr;
-module_param(mac_addr, charp, S_IRUGO);
+static u8 mac_addr[6] = {0};
+static bool smsc_mac_addr_set;
+module_param_array_named(mac_addr, mac_addr, byte, NULL, 0);
+MODULE_PARM_DESC(mac_addr, "SMSC command line MAC address");
 
 static u32 boot_wol_config = 0;
 module_param(boot_wol_config, int, 0644);
@@ -839,27 +841,6 @@ static int smsc95xx_ioctl(struct net_device *netdev, struct ifreq *rq, int cmd)
 	return generic_mii_ioctl(&dev->mii, if_mii(rq), cmd, NULL);
 }
 
-static int ethernet_get_mac_addr(u8 *buf)
-{
-	int addr[ETH_ALEN];
-	int i;
-
-	if (!buf || !mac_addr)
-		return -EINVAL;
-
-	pr_info("%s: raw mac_addr %s\n", __func__, mac_addr);
-	if (sscanf(mac_addr, "%x:%x:%x:%x:%x:%x", &addr[0], &addr[1],
-		   &addr[2], &addr[3], &addr[4], &addr[5]) == 6) {
-		for (i = 0; i < ETH_ALEN; i++) {
-			if (addr[i] > 0xff)
-				break;
-			buf[i] = addr[i];
-		}
-		return 0;
-	}
-	return -EINVAL;
-}
-
 static void smsc95xx_init_mac_address(struct usbnet *dev)
 {
 	/* try reading mac address from EEPROM */
@@ -872,14 +853,18 @@ static void smsc95xx_init_mac_address(struct usbnet *dev)
 		}
 	}
 
-	/* use mac address configured by module_param, or else
-	 * generate a random one.
-	 */
-	if (ethernet_get_mac_addr(dev->net->dev_addr)) {
-		eth_hw_addr_random(dev->net);
+	/* try reading mac address from command line */
+	if (is_valid_ether_addr(mac_addr) && !smsc_mac_addr_set) {
+		memcpy(dev->net->dev_addr, mac_addr, sizeof(mac_addr));
+		smsc_mac_addr_set = true;
 		netif_dbg(dev, ifup, dev->net,
-			  "MAC address set to random_ether_addr\n");
+				"MAC address read from command line");
+		return;
 	}
+
+	/* no eeprom, or eeprom values are invalid. generate random MAC */
+	eth_hw_addr_random(dev->net);
+	netif_dbg(dev, ifup, dev->net, "MAC address set to random_ether_addr\n");
 }
 
 static int smsc95xx_set_mac_address(struct usbnet *dev)

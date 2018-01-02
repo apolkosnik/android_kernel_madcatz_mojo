@@ -235,7 +235,10 @@ int __pm_genpd_poweron(struct generic_pm_domain *genpd)
 		if (elapsed_ns > genpd->power_on_latency_ns) {
 			genpd->power_on_latency_ns = elapsed_ns;
 			genpd->max_off_time_changed = true;
+<<<<<<< HEAD
+=======
 			genpd_recalc_cpu_exit_latency(genpd);
+>>>>>>> 28f163b1413dd1c5a328116e0d53eb20423898da
 			if (genpd->name)
 				pr_warning("%s: Power-on latency exceeded, "
 					"new value %lld ns\n", genpd->name,

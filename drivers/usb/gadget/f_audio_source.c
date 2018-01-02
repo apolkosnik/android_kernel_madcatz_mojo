@@ -22,11 +22,9 @@
 #include <sound/pcm.h>
 
 #define SAMPLE_RATE 44100
-/* Each frame is two 16 bit integers (one per channel) */
-#define BYTES_PER_FRAME 4
 #define FRAMES_PER_MSEC (SAMPLE_RATE / 1000)
 
-#define IN_EP_MAX_PACKET_SIZE 384
+#define IN_EP_MAX_PACKET_SIZE 256
 
 /* Number of requests to allocate */
 #define IN_EP_REQ_COUNT 4
@@ -245,7 +243,6 @@ struct audio_dev {
 
 	struct list_head		idle_reqs;
 	struct usb_ep			*in_ep;
-	struct usb_endpoint_descriptor	*in_desc;
 
 	spinlock_t			lock;
 
@@ -583,11 +580,17 @@ audio_bind(struct usb_configuration *c, struct usb_function *f)
 		goto fail;
 	ac_interface_desc.bInterfaceNumber = status;
 
+	/* AUDIO_AC_INTERFACE */
+	ac_header_desc.baInterfaceNr[0] = status;
+
 	status = usb_interface_id(c, f);
 	if (status < 0)
 		goto fail;
 	as_interface_alt_0_desc.bInterfaceNumber = status;
 	as_interface_alt_1_desc.bInterfaceNumber = status;
+
+	/* AUDIO_AS_INTERFACE */
+	ac_header_desc.baInterfaceNr[1] = status;
 
 	status = -ENODEV;
 
@@ -782,7 +785,6 @@ int audio_source_bind_config(struct usb_configuration *c,
 
 	config->card = -1;
 	config->device = -1;
-
 
 	audio = &_audio_dev;
 
