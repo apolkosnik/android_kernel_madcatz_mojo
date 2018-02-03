@@ -1,7 +1,8 @@
 /*
  * Common function shared by Linux WEXT, cfg80211 and p2p drivers
  *
- * Copyright (C) 1999-2014, Broadcom Corporation
+ * Copyright (C) 1999-2015, Broadcom Corporation
+ * Copyright (C) 2017 NVIDIA Corporation. All rights reserved.
  * 
  *      Unless you and Broadcom execute a separate written software license
  * agreement governing use of this software, this software is licensed to you
@@ -21,7 +22,7 @@
  * software in any way with any other Broadcom software provided under a license
  * other than the GPL, without Broadcom's express prior written consent.
  *
- * $Id: wldev_common.c 432642 2013-10-29 04:23:40Z $
+ * $Id: wldev_common.c 527441 2015-01-19 04:13:03Z $
  */
 
 #include <osl.h>
@@ -29,8 +30,14 @@
 #include <linux/kthread.h>
 #include <linux/netdevice.h>
 
+#include "dynamic.h"
+
 #include <wldev_common.h>
 #include <bcmutils.h>
+
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+#include "dhd_custom_sysfs_tegra_stat.h"
+#endif /* CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA */
 
 #define htod32(i) (i)
 #define htod16(i) (i)
@@ -172,9 +179,12 @@ s32 wldev_mkiovar_bsscfg(
 		WLDEV_ERROR(("%s: buffer is too short\n", __FUNCTION__));
 		return BCME_BUFTOOSHORT;
 	}
+	if (iovar_buf && buflen != 0)
+		memset(iovar_buf, 0, buflen);
+	else
+		return BCME_BADARG;
 
 	p = (s8 *)iovar_buf;
-
 	/* copy prefix, no null */
 	memcpy(p, prefix, prefixlen);
 	p += prefixlen;
@@ -272,6 +282,7 @@ int wldev_get_link_speed(
 
 	if (!plink_speed)
 		return -ENOMEM;
+	*plink_speed = 0;
 	error = wldev_ioctl(dev, WLC_GET_RATE, plink_speed, sizeof(int), 0);
 	if (unlikely(error))
 		return error;
@@ -282,20 +293,21 @@ int wldev_get_link_speed(
 }
 
 int wldev_get_rssi(
-	struct net_device *dev, int *prssi)
+	struct net_device *dev, scb_val_t *scb_val)
 {
-	scb_val_t scb_val;
 	int error;
 
-	if (!prssi)
+	if (!scb_val)
 		return -ENOMEM;
-	bzero(&scb_val, sizeof(scb_val_t));
 
-	error = wldev_ioctl(dev, WLC_GET_RSSI, &scb_val, sizeof(scb_val_t), 0);
+	error = wldev_ioctl(dev, WLC_GET_RSSI, scb_val, sizeof(scb_val_t), 0);
 	if (unlikely(error))
 		return error;
 
-	*prssi = dtoh32(scb_val.val);
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+	TEGRA_SYSFS_HISTOGRAM_DRIVER_STAT_INC(aggr_num_rssi_ioctl);
+#endif /* CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA */
+
 	return error;
 }
 
@@ -306,6 +318,7 @@ int wldev_get_ssid(
 
 	if (!pssid)
 		return -ENOMEM;
+	memset(pssid, 0, sizeof(wlc_ssid_t));
 	error = wldev_ioctl(dev, WLC_GET_SSID, pssid, sizeof(wlc_ssid_t), 0);
 	if (unlikely(error))
 		return error;
@@ -318,6 +331,7 @@ int wldev_get_band(
 {
 	int error;
 
+	*pband = 0;
 	error = wldev_ioctl(dev, WLC_GET_BAND, pband, sizeof(uint), 0);
 	return error;
 }
@@ -335,6 +349,72 @@ int wldev_set_band(
 	return error;
 }
 
+int wldev_get_datarate(struct net_device *dev, int *datarate)
+{
+	int error = 0;
+
+	error = wldev_ioctl(dev, WLC_GET_RATE, datarate, sizeof(int), false);
+	if (error) {
+		return -1;
+	} else {
+		*datarate = dtoh32(*datarate);
+	}
+
+	return error;
+}
+
+extern chanspec_t
+wl_chspec_driver_to_host(chanspec_t chanspec);
+#define WL_EXTRA_BUF_MAX 2048
+int wldev_get_mode(
+	struct net_device *dev, uint8 *cap)
+{
+	int error = 0;
+	int chanspec = 0;
+	uint16 band = 0;
+	uint16 bandwidth = 0;
+	wl_bss_info_t *bss = NULL;
+	char* buf = kmalloc(WL_EXTRA_BUF_MAX, GFP_KERNEL);
+	if (!buf)
+		return -1;
+
+	*(u32*) buf = htod32(WL_EXTRA_BUF_MAX);
+	error = wldev_ioctl(dev, WLC_GET_BSS_INFO, (void*)buf, WL_EXTRA_BUF_MAX, false);
+	if (error) {
+		WLDEV_ERROR(("%s:failed:%d\n", __FUNCTION__, error));
+		return -1;
+	}
+	bss = (struct  wl_bss_info *)(buf + 4);
+	chanspec = wl_chspec_driver_to_host(bss->chanspec);
+
+	band = chanspec & WL_CHANSPEC_BAND_MASK;
+	bandwidth = chanspec & WL_CHANSPEC_BW_MASK;
+
+	if (band == WL_CHANSPEC_BAND_2G) {
+		if (bss->n_cap)
+			strcpy(cap, "n");
+		else
+			strcpy(cap, "bg");
+	} else if (band == WL_CHANSPEC_BAND_5G) {
+		if (bandwidth == WL_CHANSPEC_BW_80)
+			strcpy(cap, "ac");
+		else if ((bandwidth == WL_CHANSPEC_BW_40) || (bandwidth == WL_CHANSPEC_BW_20)) {
+			if ((bss->nbss_cap & 0xf00) && (bss->n_cap))
+				strcpy(cap, "n|ac");
+			else if (bss->n_cap)
+				strcpy(cap, "n");
+			else if (bss->vht_cap)
+				strcpy(cap, "ac");
+			else
+				strcpy(cap, "a");
+		} else {
+			WLDEV_ERROR(("%s:Mode get failed\n", __FUNCTION__));
+			return -1;
+		}
+
+	}
+	return error;
+}
 int wldev_set_country(
 	struct net_device *dev, char *country_code, bool notify, bool user_enforced)
 {
@@ -343,9 +423,6 @@ int wldev_set_country(
 	scb_val_t scbval;
 	char smbuf[WLC_IOCTL_SMLEN];
 
-	if (!country_code)
-		return error;
-
 	bzero(&scbval, sizeof(scb_val_t));
 	error = wldev_iovar_getbuf(dev, "country", NULL, 0, &cspec, sizeof(cspec), NULL);
 	if (error < 0) {
@@ -353,46 +430,61 @@ int wldev_set_country(
 		return error;
 	}
 
-	if ((error < 0) ||
-	    (strncmp(country_code, cspec.country_abbrev, WLC_CNTRY_BUF_SZ) != 0)) {
+	/* Skip setting same country code provided again */
+	if (country_code &&
+	    (strncmp(country_code, cspec.country_abbrev, WLC_CNTRY_BUF_SZ) == 0))
+		return 0;
 
-		if (user_enforced) {
-			bzero(&scbval, sizeof(scb_val_t));
-			error = wldev_ioctl(dev, WLC_DISASSOC, &scbval, sizeof(scb_val_t), true);
-			if (error < 0) {
-				WLDEV_ERROR(("%s: set country failed due to Disassoc error %d\n",
-					__FUNCTION__, error));
-				return error;
-			}
-		}
+	/* Reset existing country code if none provided */
+	if (!country_code)
+		goto set_cur_ccode;
 
-		cspec.rev = -1;
-		memcpy(cspec.country_abbrev, country_code, WLC_CNTRY_BUF_SZ);
-		memcpy(cspec.ccode, country_code, WLC_CNTRY_BUF_SZ);
-		dhd_get_customized_country_code(dev, (char *)&cspec.country_abbrev, &cspec);
-		error = wldev_iovar_setbuf(dev, "country", &cspec, sizeof(cspec),
-			smbuf, sizeof(smbuf), NULL);
+	if (user_enforced) {
+		bzero(&scbval, sizeof(scb_val_t));
+		error = wldev_ioctl(dev, WLC_DISASSOC, &scbval, sizeof(scb_val_t), true);
 		if (error < 0) {
-			WLDEV_ERROR(("%s: set country for %s as %s rev %d failed\n",
-				__FUNCTION__, country_code, cspec.ccode, cspec.rev));
+			WLDEV_ERROR(("%s: set country failed due to Disassoc error %d\n",
+				__FUNCTION__, error));
 			return error;
 		}
-		dhd_bus_country_set(dev, &cspec, notify);
-		WLDEV_ERROR(("%s: set country for %s as %s rev %d\n",
-			__FUNCTION__, country_code, cspec.ccode, cspec.rev));
 	}
+
+	cspec.rev = -1;
+	memcpy(cspec.country_abbrev, country_code, WLC_CNTRY_BUF_SZ);
+	memcpy(cspec.ccode, country_code, WLC_CNTRY_BUF_SZ);
+	dhd_get_customized_country_code(dev, (char *)&cspec.country_abbrev, &cspec);
+
+set_cur_ccode:
+
+	error = wldev_iovar_setbuf(dev, "country", &cspec, sizeof(cspec),
+		smbuf, sizeof(smbuf), NULL);
+	if (error < 0) {
+		WLDEV_ERROR(("%s: set country for %s as %s rev %d failed\n",
+			__FUNCTION__, country_code, cspec.ccode, cspec.rev));
+		return error;
+	}
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+	memcpy(bcmdhd_stat.fw_stat.cur_country_code,
+			cspec.country_abbrev, WLC_CNTRY_BUF_SZ);
+#endif /* CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA */
+	dhd_bus_country_set(dev, &cspec, notify);
+	WLDEV_ERROR(("%s: set country for %s as %s rev %d\n",
+		__FUNCTION__, country_code, cspec.ccode, cspec.rev));
+
 	return 0;
 }
 
 /* tuning performance for miracast */
+
 int wldev_miracast_tuning(
 	struct net_device *dev, char *command, int total_len)
 {
 	int error = 0;
 	int mode = 0;
 	int ampdu_mpdu;
-	int roam_off;
 	int ampdu_rx_tid = -1;
+	int disable_interference_mitigation = 0;
+	int auto_interference_mitigation = -1;
 #ifdef VSDB_BW_ALLOCATE_ENABLE
 	int mchan_algo;
 	int mchan_bw;
@@ -405,15 +497,13 @@ int wldev_miracast_tuning(
 
 set_mode:
 
-	WLDEV_ERROR(("mode: %d\n", mode));
 
 	if (mode == 0) {
 		/* Normal mode: restore everything to default */
+#ifdef CUSTOM_AMPDU_MPDU
+		ampdu_mpdu = CUSTOM_AMPDU_MPDU;
+#else
 		ampdu_mpdu = -1;	/* FW default */
-#if defined(ROAM_ENABLE)
-		roam_off = 0;	/* roam enable */
-#elif defined(DISABLE_BUILTIN_ROAM)
-		roam_off = 1;	/* roam disable */
 #endif
 #ifdef VSDB_BW_ALLOCATE_ENABLE
 		mchan_algo = 0;	/* Default */
@@ -423,9 +513,6 @@ set_mode:
 	else if (mode == 1) {
 		/* Miracast source mode */
 		ampdu_mpdu = 8;	/* for tx latency */
-#if defined(ROAM_ENABLE) || defined(DISABLE_BUILTIN_ROAM)
-		roam_off = 1; /* roam disable */
-#endif
 #ifdef VSDB_BW_ALLOCATE_ENABLE
 		mchan_algo = 1;	/* BW based */
 		mchan_bw = 25;	/* 25:75 */
@@ -434,9 +521,6 @@ set_mode:
 	else if (mode == 2) {
 		/* Miracast sink/PC Gaming mode */
 		ampdu_mpdu = 8;	/* FW default */
-#if defined(ROAM_ENABLE) || defined(DISABLE_BUILTIN_ROAM)
-		roam_off = 1; /* roam disable */
-#endif
 #ifdef VSDB_BW_ALLOCATE_ENABLE
 		mchan_algo = 0;	/* Default */
 		mchan_bw = 50;	/* 50:50 */
@@ -449,8 +533,29 @@ set_mode:
 		ampdu_rx_tid = 0x7f;
 		mode = 0;
 		goto set_mode;
-	}
-	else {
+	} else if (mode == 5) {
+		/* Blake connected mode, disable interference mitigation */
+		error = wldev_ioctl(dev, WLC_SET_INTERFERENCE_OVERRIDE_MODE,
+			&disable_interference_mitigation, sizeof(int), true);
+		if (error) {
+			WLDEV_ERROR((
+				"Failed to set interference_override: mode:%d, error:%d\n",
+				mode, error));
+			return -1;
+		}
+		return error;
+	} else if (mode == 6) {
+		/* No Blake connected, enable auto interference mitigation */
+		error = wldev_ioctl(dev, WLC_SET_INTERFERENCE_OVERRIDE_MODE,
+			&auto_interference_mitigation, sizeof(int), true);
+		if (error) {
+			WLDEV_ERROR((
+				"Failed to set interference_override: mode:%d, error:%d\n",
+				mode, error));
+			return -1;
+		}
+		return error;
+	} else {
 		WLDEV_ERROR(("Unknown mode: %d\n", mode));
 		return -1;
 	}
@@ -463,16 +568,11 @@ set_mode:
 		return -1;
 	}
 
-#if defined(ROAM_ENABLE) || defined(DISABLE_BUILTIN_ROAM)
-	error = wldev_iovar_setint(dev, "roam_off", roam_off);
-	if (error) {
-		WLDEV_ERROR(("Failed to set roam_off: mode:%d, error:%d\n",
-			mode, error));
-		return -1;
-	}
-#endif /* ROAM_ENABLE || DISABLE_BUILTIN_ROAM */
+	if (ampdu_rx_tid != -1)
+		dhd_set_ampdu_rx_tid(dev, ampdu_rx_tid);
 
 #ifdef VSDB_BW_ALLOCATE_ENABLE
+if (bcmdhd_vsdb_bw_allocate_enable) {
 	error = wldev_iovar_setint(dev, "mchan_algo", mchan_algo);
 	if (error) {
 		WLDEV_ERROR(("Failed to set mchan_algo: mode:%d, error:%d\n",
@@ -486,12 +586,63 @@ set_mode:
 			mode, error));
 		return -1;
 	}
+}
 #endif /* VSDB_BW_ALLOCATE_ENABLE */
 
-	if (ampdu_rx_tid != -1)
-		dhd_set_ampdu_rx_tid(dev, ampdu_rx_tid);
-
 	return error;
+}
+
+int wldev_get_rx_rate_stats(
+	struct net_device *dev, char *command, int total_len)
+{
+	wl_scb_rx_rate_stats_t *rstats;
+	struct ether_addr ea;
+	char smbuf[WLC_IOCTL_SMLEN];
+	char eabuf[18] = {0, };
+	int bytes_written = 0;
+	int error;
+
+	memcpy(eabuf, command+strlen("RXRATESTATS")+1, 17);
+
+	if (!bcm_ether_atoe(eabuf, &ea)) {
+		WLDEV_ERROR(("Invalid MAC Address\n"));
+		return -1;
+	}
+
+	error = wldev_iovar_getbuf(dev, "rx_rate_stats",
+		&ea, ETHER_ADDR_LEN, smbuf, sizeof(smbuf), NULL);
+	if (error < 0) {
+		WLDEV_ERROR(("get rx_rate_stats failed = %d\n", error));
+		return -1;
+	}
+
+	rstats = (wl_scb_rx_rate_stats_t *)smbuf;
+	bytes_written = sprintf(command, "1/%d/%d,",
+		dtoh32(rstats->rx1mbps[0]), dtoh32(rstats->rx1mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "2/%d/%d,",
+		dtoh32(rstats->rx2mbps[0]), dtoh32(rstats->rx2mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "5.5/%d/%d,",
+		dtoh32(rstats->rx5mbps5[0]), dtoh32(rstats->rx5mbps5[1]));
+	bytes_written += sprintf(command+bytes_written, "6/%d/%d,",
+		dtoh32(rstats->rx6mbps[0]), dtoh32(rstats->rx6mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "9/%d/%d,",
+		dtoh32(rstats->rx9mbps[0]), dtoh32(rstats->rx9mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "11/%d/%d,",
+		dtoh32(rstats->rx11mbps[0]), dtoh32(rstats->rx11mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "12/%d/%d,",
+		dtoh32(rstats->rx12mbps[0]), dtoh32(rstats->rx12mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "18/%d/%d,",
+		dtoh32(rstats->rx18mbps[0]), dtoh32(rstats->rx18mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "24/%d/%d,",
+		dtoh32(rstats->rx24mbps[0]), dtoh32(rstats->rx24mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "36/%d/%d,",
+		dtoh32(rstats->rx36mbps[0]), dtoh32(rstats->rx36mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "48/%d/%d,",
+		dtoh32(rstats->rx48mbps[0]), dtoh32(rstats->rx48mbps[1]));
+	bytes_written += sprintf(command+bytes_written, "54/%d/%d",
+		dtoh32(rstats->rx54mbps[0]), dtoh32(rstats->rx54mbps[1]));
+
+	return bytes_written;
 }
 
 int wldev_get_assoc_resp_ie(
@@ -537,8 +688,8 @@ int wldev_get_assoc_resp_ie(
 
 	/* Retrieve assoc resp IEs */
 	if (resp_ies_len) {
-		error = wldev_iovar_getbuf(dev, "assoc_resp_ies",
-			NULL, 0, smbuf, sizeof(smbuf), NULL);
+		error = wldev_iovar_getbuf(dev, "assoc_resp_ies", NULL, 0, smbuf, sizeof(smbuf),
+			NULL);
 		if (error < 0) {
 			WLDEV_ERROR(("get assoc_resp_ies failed = %d\n", error));
 			return -1;
@@ -673,57 +824,4 @@ done:
 
 	return bytes_written;
 
-}
-
-int wldev_get_rx_rate_stats(
-	struct net_device *dev, char *command, int total_len)
-{
-	wl_scb_rx_rate_stats_t *rstats;
-	struct ether_addr ea;
-	char smbuf[WLC_IOCTL_SMLEN];
-	char eabuf[18] = {0, };
-	int bytes_written = 0;
-	int error;
-
-	memcpy(eabuf, command+strlen("RXRATESTATS")+1, 17);
-
-	if (!bcm_ether_atoe(eabuf, &ea)) {
-		WLDEV_ERROR(("Invalid MAC Address\n"));
-		return -1;
-	}
-
-	error = wldev_iovar_getbuf(dev, "rx_rate_stats",
-		&ea, ETHER_ADDR_LEN, smbuf, sizeof(smbuf), NULL);
-	if (error < 0) {
-		WLDEV_ERROR(("get rx_rate_stats failed = %d\n", error));
-		return -1;
-	}
-
-	rstats = (wl_scb_rx_rate_stats_t *)smbuf;
-	bytes_written = sprintf(command, "1/%d/%d,",
-		dtoh32(rstats->rx1mbps[0]), dtoh32(rstats->rx1mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "2/%d/%d,",
-		dtoh32(rstats->rx2mbps[0]), dtoh32(rstats->rx2mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "5.5/%d/%d,",
-		dtoh32(rstats->rx5mbps5[0]), dtoh32(rstats->rx5mbps5[1]));
-	bytes_written += sprintf(command+bytes_written, "6/%d/%d,",
-		dtoh32(rstats->rx6mbps[0]), dtoh32(rstats->rx6mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "9/%d/%d,",
-		dtoh32(rstats->rx9mbps[0]), dtoh32(rstats->rx9mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "11/%d/%d,",
-		dtoh32(rstats->rx11mbps[0]), dtoh32(rstats->rx11mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "12/%d/%d,",
-		dtoh32(rstats->rx12mbps[0]), dtoh32(rstats->rx12mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "18/%d/%d,",
-		dtoh32(rstats->rx18mbps[0]), dtoh32(rstats->rx18mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "24/%d/%d,",
-		dtoh32(rstats->rx24mbps[0]), dtoh32(rstats->rx24mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "36/%d/%d,",
-		dtoh32(rstats->rx36mbps[0]), dtoh32(rstats->rx36mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "48/%d/%d,",
-		dtoh32(rstats->rx48mbps[0]), dtoh32(rstats->rx48mbps[1]));
-	bytes_written += sprintf(command+bytes_written, "54/%d/%d",
-		dtoh32(rstats->rx54mbps[0]), dtoh32(rstats->rx54mbps[1]));
-
-	return bytes_written;
 }

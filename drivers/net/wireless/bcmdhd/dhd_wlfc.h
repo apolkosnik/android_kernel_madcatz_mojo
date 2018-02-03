@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 1999-2014, Broadcom Corporation
+* Copyright (C) 1999-2015, Broadcom Corporation
 * 
 *      Unless you and Broadcom execute a separate written software license
 * agreement governing use of this software, this software is licensed to you
@@ -18,7 +18,7 @@
 *      Notwithstanding the above, under no circumstances may you combine this
 * software in any way with any other Broadcom software provided under a license
 * other than the GPL, without Broadcom's express prior written consent.
-* $Id: dhd_wlfc.h 453829 2014-02-06 12:28:45Z $
+* $Id: dhd_wlfc.h 530091 2015-01-29 04:30:33Z $
 *
 */
 #ifndef __wlfc_host_driver_definitions_h__
@@ -29,6 +29,11 @@
 #endif
 
 /* #define OOO_DEBUG */
+
+#define KERNEL_THREAD_RETURN_TYPE int
+
+typedef int (*f_commitpkt_t)(void* ctx, void* p);
+typedef bool (*f_processpkt_t)(void* p, void* arg);
 
 #define WLFC_UNSUPPORTED -9999
 
@@ -43,7 +48,10 @@
 #define WLFC_HANGER_ITEM_STATE_FREE			1
 #define WLFC_HANGER_ITEM_STATE_INUSE			2
 #define WLFC_HANGER_ITEM_STATE_INUSE_SUPPRESSED		3
-#define WLFC_HANGER_ITEM_STATE_WAIT_CLEAN		4
+
+#define WLFC_HANGER_PKT_STATE_TXSTATUS			1
+#define WLFC_HANGER_PKT_STATE_TXCOMPLETE		2
+#define WLFC_HANGER_PKT_STATE_CLEANUP			4
 
 typedef enum {
 	Q_TYPE_PSQ,
@@ -67,7 +75,8 @@ typedef enum ewlfc_mac_entry_action {
 typedef struct wlfc_hanger_item {
 	uint8	state;
 	uint8   gen;
-	uint8	pad[2];
+	uint8	pkt_state;
+	uint8	pkt_txstatus;
 	uint32	identifier;
 	void*	pkt;
 #ifdef PROP_TXSTATUS_DEBUG
@@ -101,6 +110,13 @@ typedef struct wlfc_hanger {
 #define WLFC_FLOWCONTROL_HIWATER	(2048 - 256)
 #define WLFC_FLOWCONTROL_LOWATER	256
 
+#if (WLFC_FLOWCONTROL_HIWATER >= (WLFC_PSQ_LEN - 256))
+#undef WLFC_FLOWCONTROL_HIWATER
+#define WLFC_FLOWCONTROL_HIWATER	(WLFC_PSQ_LEN - 256)
+#undef WLFC_FLOWCONTROL_LOWATER
+#define WLFC_FLOWCONTROL_LOWATER	(WLFC_FLOWCONTROL_HIWATER / 4)
+#endif
+
 #define WLFC_LOG_BUF_SIZE		(1024*1024)
 
 typedef struct wlfc_mac_descriptor {
@@ -129,9 +145,9 @@ typedef struct wlfc_mac_descriptor {
 	uint8 send_tim_signal;
 	uint8 mac_handle;
 	/* Number of packets at dongle for this entry. */
-	uint transit_count;
+	int transit_count;
 	/* Numbe of suppression to wait before evict from delayQ */
-	uint suppr_transit_count;
+	int suppr_transit_count;
 	/* flag. TRUE when in suppress state */
 	uint8 suppressed;
 
@@ -234,11 +250,17 @@ typedef struct athost_wl_stat_counters {
 #define WLFC_FCMODE_EXPLICIT_CREDIT		2
 #define WLFC_ONLY_AMPDU_HOSTREORDER		3
 
+/* Reserved credits ratio when borrowed by hihger priority */
+#define WLFC_BORROW_LIMIT_RATIO		4
+
 /* How long to defer borrowing in milliseconds */
 #define WLFC_BORROW_DEFER_PERIOD_MS 100
 
 /* How long to defer flow control in milliseconds */
 #define WLFC_FC_DEFER_PERIOD_MS 200
+
+/* How long to detect occurance per AC in miliseconds */
+#define WLFC_RX_DETECTION_THRESHOLD_MS	100
 
 /* Mask to represent available ACs (note: BC/MC is ignored */
 #define WLFC_AC_MASK 0xF
@@ -250,6 +272,9 @@ typedef struct athost_wl_status_info {
 	osl_t*	osh;
 	/* dhd pub */
 	void*	dhdp;
+
+	f_commitpkt_t fcommit;
+	void* commit_ctx;
 
 	/* stats */
 	athost_wl_stat_counters_t stats;
@@ -283,8 +308,11 @@ typedef struct athost_wl_status_info {
 	/* pkt counts for each interface and ac */
 	int	pkt_cnt_in_q[WLFC_MAX_IFNUM][AC_COUNT+1];
 	int	pkt_cnt_per_ac[AC_COUNT+1];
+	int	pkt_cnt_in_drv[WLFC_MAX_IFNUM][AC_COUNT+1];
+	int	pkt_cnt_in_psq;
 	uint8	allow_fc;
 	uint32  fc_defer_timestamp;
+	uint32	rx_timestamp[AC_COUNT+1];
 	/* ON/OFF state for flow control to the host network interface */
 	uint8	hostif_flow_state[WLFC_MAX_IFNUM];
 	uint8	host_ifidx;
@@ -459,9 +487,6 @@ typedef struct dhd_pkttag {
 #define PSQ_SUP_IDX(x) (x * 2 + 1)
 #define PSQ_DLY_IDX(x) (x * 2)
 
-typedef int (*f_commitpkt_t)(void* ctx, void* p);
-typedef bool (*f_processpkt_t)(void* p, void* arg);
-
 #ifdef PROP_TXSTATUS_DEBUG
 #define DHD_WLFC_CTRINC_MAC_CLOSE(entry)	do { (entry)->closed_ct++; } while (0)
 #define DHD_WLFC_CTRINC_MAC_OPEN(entry)		do { (entry)->opened_ct++; } while (0)
@@ -473,13 +498,16 @@ typedef bool (*f_processpkt_t)(void* p, void* arg);
 /* public functions */
 int dhd_wlfc_parse_header_info(dhd_pub_t *dhd, void* pktbuf, int tlv_hdr_len,
 	uchar *reorder_info_buf, uint *reorder_info_len);
+KERNEL_THREAD_RETURN_TYPE dhd_wlfc_transfer_packets(void *data);
 int dhd_wlfc_commit_packets(dhd_pub_t *dhdp, f_commitpkt_t fcommit,
 	void* commit_ctx, void *pktbuf, bool need_toggle_host_if);
 int dhd_wlfc_txcomplete(dhd_pub_t *dhd, void *txp, bool success);
 int dhd_wlfc_init(dhd_pub_t *dhd);
-int dhd_wlfc_hostreorder_init(dhd_pub_t *dhd);
+#ifdef SUPPORT_P2P_GO_PS
 int dhd_wlfc_suspend(dhd_pub_t *dhd);
 int dhd_wlfc_resume(dhd_pub_t *dhd);
+#endif /* SUPPORT_P2P_GO_PS */
+int dhd_wlfc_hostreorder_init(dhd_pub_t *dhd);
 int dhd_wlfc_cleanup_txq(dhd_pub_t *dhd, f_processpkt_t fn, void *arg);
 int dhd_wlfc_cleanup(dhd_pub_t *dhd, f_processpkt_t fn, void* arg);
 int dhd_wlfc_deinit(dhd_pub_t *dhd);
@@ -495,6 +523,7 @@ int dhd_wlfc_set_mode(dhd_pub_t *dhd, int val);
 bool dhd_wlfc_is_supported(dhd_pub_t *dhd);
 bool dhd_wlfc_is_header_only_pkt(dhd_pub_t * dhd, void *pktbuf);
 int dhd_wlfc_flowcontrol(dhd_pub_t *dhdp, bool state, bool bAcquireLock);
+int dhd_wlfc_save_rxpath_ac_time(dhd_pub_t * dhd, uint8 prio);
 
 int dhd_wlfc_get_module_ignore(dhd_pub_t *dhd, int *val);
 int dhd_wlfc_set_module_ignore(dhd_pub_t *dhd, int val);
@@ -502,4 +531,7 @@ int dhd_wlfc_get_credit_ignore(dhd_pub_t *dhd, int *val);
 int dhd_wlfc_set_credit_ignore(dhd_pub_t *dhd, int val);
 int dhd_wlfc_get_txstatus_ignore(dhd_pub_t *dhd, int *val);
 int dhd_wlfc_set_txstatus_ignore(dhd_pub_t *dhd, int val);
+
+int dhd_wlfc_get_rxpkt_chk(dhd_pub_t *dhd, int *val);
+int dhd_wlfc_set_rxpkt_chk(dhd_pub_t *dhd, int val);
 #endif /* __wlfc_host_driver_definitions_h__ */

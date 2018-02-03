@@ -1,7 +1,7 @@
 /*
  * DHD Protocol Module for CDC and BDC.
  *
- * Copyright (C) 1999-2014, Broadcom Corporation
+ * Copyright (C) 1999-2015, Broadcom Corporation
  * 
  *      Unless you and Broadcom execute a separate written software license
  * agreement governing use of this software, this software is licensed to you
@@ -21,7 +21,7 @@
  * software in any way with any other Broadcom software provided under a license
  * other than the GPL, without Broadcom's express prior written consent.
  *
- * $Id: dhd_cdc.c 449353 2014-01-16 21:34:16Z $
+ * $Id: dhd_cdc.c 530091 2015-01-29 04:30:33Z $
  *
  * BDC is like CDC, except it includes a header for data packets to convey
  * packet priority over the bus, and flags (e.g. to indicate checksum status
@@ -56,6 +56,8 @@
 #define ROUND_UP_MARGIN	2048	/* Biggest SDIO block size possible for
 				 * round off at the end of buffer
 				 */
+
+extern int dhd_skip_hang_event(void *dhd);
 
 typedef struct dhd_prot {
 	uint16 reqid;
@@ -272,6 +274,11 @@ dhd_prot_ioctl(dhd_pub_t *dhd, int ifidx, wl_ioctl_t * ioc, void * buf, int len)
 	int ret = -1;
 	uint8 action;
 
+	if (dhd_skip_hang_event(dhd->info)) {
+		DHD_TRACE(("%s : Skip Hang event during shut down...we have nothing to do\n", __FUNCTION__));
+		goto done;
+	}
+
 	if ((dhd->busstate == DHD_BUS_DOWN) || dhd->hang_was_sent) {
 		DHD_ERROR(("%s : bus is down. we have nothing to do\n", __FUNCTION__));
 		goto done;
@@ -378,6 +385,17 @@ dhd_prot_hdrpush(dhd_pub_t *dhd, int ifidx, void *PKTBUF)
 	BDC_SET_IF_IDX(h, ifidx);
 }
 #undef PKTBUF	/* Only defined in the above routine */
+
+uint
+dhd_prot_hdrlen(dhd_pub_t *dhd, void *PKTBUF)
+{
+	uint hdrlen = 0;
+#ifdef BDC
+	/* Length of BDC(+WLFC) headers pushed */
+	hdrlen = BDC_HEADER_LEN + (((struct bdc_header *)PKTBUF)->dataOffset * 4);
+#endif
+	return hdrlen;
+}
 
 int
 dhd_prot_hdrpull(dhd_pub_t *dhd, int *ifidx, void *pktbuf, uchar *reorder_buf_info,
@@ -498,7 +516,8 @@ dhd_prot_detach(dhd_pub_t *dhd)
 void
 dhd_prot_dstats(dhd_pub_t *dhd)
 {
-/* No stats from dongle added yet, copy bus stats */
+	/*  copy bus stats */
+
 	dhd->dstats.tx_packets = dhd->tx_packets;
 	dhd->dstats.tx_errors = dhd->tx_errors;
 	dhd->dstats.rx_packets = dhd->rx_packets;
@@ -509,7 +528,7 @@ dhd_prot_dstats(dhd_pub_t *dhd)
 }
 
 int
-dhd_prot_init(dhd_pub_t *dhd)
+dhd_sync_with_dongle(dhd_pub_t *dhd)
 {
 	int ret = 0;
 	wlc_rev_info_t revinfo;
@@ -523,13 +542,23 @@ dhd_prot_init(dhd_pub_t *dhd)
 		goto done;
 
 
+	dhd_process_cid_mac(dhd, TRUE);
+
 	ret = dhd_preinit_ioctls(dhd);
+
+	if (!ret)
+		dhd_process_cid_mac(dhd, FALSE);
 
 	/* Always assumes wl for now */
 	dhd->iswl = TRUE;
 
 done:
 	return ret;
+}
+
+int dhd_prot_init(dhd_pub_t *dhd)
+{
+	return TRUE;
 }
 
 void
