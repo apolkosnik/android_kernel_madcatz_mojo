@@ -49,12 +49,6 @@ struct nvhost_waitlist {
 	int count;
 };
 
-struct nvhost_waitlist_external_notifier {
-	struct nvhost_master *master;
-	void (*callback)(void *, int);
-	void *private_data;
-};
-
 enum waitlist_state {
 	WLS_PENDING,
 	WLS_REMOVED,
@@ -150,23 +144,11 @@ void reset_threshold_interrupt(struct nvhost_intr *intr,
 
 static void action_submit_complete(struct nvhost_waitlist *waiter)
 {
-	struct nvhost_channel *channel;
-	int nr_completed;
+	struct nvhost_channel *channel = waiter->data;
+	int nr_completed = waiter->count;
 
-	if (!waiter) {
-		pr_warn("%s: Empty Waiter\n", __func__);
-		return;
-	}
-
-	nr_completed = waiter->count;
-	channel = waiter->data;
-	if (!channel || !channel->dev) {
-		pr_warn("%s: Channel un-mapped\n", __func__);
-		return;
-	}
-
-	nvhost_module_idle_mult(channel->dev, nr_completed);
 	nvhost_cdma_update(&channel->cdma);
+	nvhost_module_idle_mult(channel->dev, nr_completed);
 
 	/*  Add nr_completed to trace */
 	trace_nvhost_channel_submit_complete(channel->dev->name,
@@ -175,8 +157,12 @@ static void action_submit_complete(struct nvhost_waitlist *waiter)
 			channel->cdma.med_prio_count,
 			channel->cdma.low_prio_count);
 
-	nvhost_putchannel_mult(channel, nr_completed);
+}
 
+static void action_gpfifo_submit_complete(struct nvhost_waitlist *waiter)
+{
+	struct channel_gk20a *ch20a = waiter->data;
+	gk20a_channel_update(ch20a, waiter->count);
 }
 
 static void action_wakeup(struct nvhost_waitlist *waiter)
@@ -184,18 +170,6 @@ static void action_wakeup(struct nvhost_waitlist *waiter)
 	wait_queue_head_t *wq = waiter->data;
 
 	wake_up(wq);
-}
-
-static void action_notify(struct nvhost_waitlist *waiter)
-{
-	struct nvhost_waitlist_external_notifier *notifier = waiter->data;
-	struct nvhost_master *master = notifier->master;
-
-	notifier->callback(notifier->private_data, waiter->count);
-
-	nvhost_module_idle_mult(master->dev, waiter->count);
-	kfree(notifier);
-	waiter->data = NULL;
 }
 
 static void action_wakeup_interruptible(struct nvhost_waitlist *waiter)
@@ -217,10 +191,10 @@ typedef void (*action_handler)(struct nvhost_waitlist *waiter);
 
 static action_handler action_handlers[NVHOST_INTR_ACTION_COUNT] = {
 	action_submit_complete,
+	action_gpfifo_submit_complete,
 	action_signal_sync_pt,
 	action_wakeup,
 	action_wakeup_interruptible,
-	action_notify,
 };
 
 static void run_handlers(struct list_head completed[NVHOST_INTR_ACTION_COUNT])
@@ -372,53 +346,6 @@ void *nvhost_intr_alloc_waiter()
 	return kzalloc(sizeof(struct nvhost_waitlist),
 			GFP_KERNEL|__GFP_REPEAT);
 }
-
-int nvhost_intr_register_notifier(struct platform_device *pdev,
-				  u32 id, u32 thresh,
-				  void (*callback)(void *, int),
-				  void *private_data)
-{
-	struct nvhost_waitlist *waiter;
-	struct nvhost_waitlist_external_notifier *notifier;
-	struct nvhost_master *master = nvhost_get_host(pdev);
-	int err = 0;
-
-	if (!callback)
-		return -EINVAL;
-
-	waiter = kzalloc(sizeof(*waiter), GFP_KERNEL | __GFP_REPEAT);
-	if (!waiter) {
-		err = -ENOMEM;
-		goto err_alloc_waiter;
-	}
-	notifier = kzalloc(sizeof(*notifier), GFP_KERNEL | __GFP_REPEAT);
-	if (!notifier) {
-		err = -ENOMEM;
-		goto err_alloc_notifier;
-	}
-
-	notifier->master = master;
-	notifier->callback = callback;
-	notifier->private_data = private_data;
-
-	/* make sure host1x stays on */
-	nvhost_module_busy(master->dev);
-
-	err = nvhost_intr_add_action(&master->intr,
-				     id, thresh,
-				     NVHOST_INTR_ACTION_NOTIFY,
-				     notifier,
-				     waiter,
-				     NULL);
-
-	return err;
-
-err_alloc_notifier:
-	kfree(waiter);
-err_alloc_waiter:
-	return err;
-}
-EXPORT_SYMBOL(nvhost_intr_register_notifier);
 
 void nvhost_intr_put_ref(struct nvhost_intr *intr, u32 id, void *ref)
 {

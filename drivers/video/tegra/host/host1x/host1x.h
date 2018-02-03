@@ -25,7 +25,6 @@
 #include <linux/nvhost.h>
 
 #include "nvhost_syncpt.h"
-#include "nvhost_channel.h"
 #include "nvhost_intr.h"
 
 #define TRACE_MAX_LENGTH	128U
@@ -38,7 +37,9 @@ struct host1x_device_info {
 	int		nb_channels;	/* host1x: num channels supported */
 	int		nb_pts; 	/* host1x: num syncpoints supported */
 	int		nb_bases;	/* host1x: num syncpoints supported */
+	u64		client_managed; /* host1x: client managed syncpts */
 	int		nb_mlocks;	/* host1x: number of mlocks */
+	const char	**syncpt_names;	/* names of sync points */
 };
 
 struct nvhost_master {
@@ -54,12 +55,7 @@ struct nvhost_master {
 	struct host1x_device_info info;
 	struct kobject *caps_kobj;
 	struct nvhost_capability_node *caps_nodes;
-
-	struct nvhost_channel chlist;	/* channel list */
-	struct mutex chlist_mutex;	/* mutex for channel list */
-	unsigned long allocated_channels;
-	unsigned long next_free_ch;
-	int cnt_alloc_channels;
+	struct mutex timeout_mutex;
 };
 
 extern struct nvhost_master *nvhost;
@@ -72,7 +68,8 @@ void nvhost_debug_dump(struct nvhost_master *master);
 int nvhost_host1x_finalize_poweron(struct platform_device *dev);
 int nvhost_host1x_prepare_poweroff(struct platform_device *dev);
 
-void nvhost_set_chanops(struct nvhost_channel *ch);
+struct nvhost_channel *nvhost_alloc_channel(struct platform_device *dev);
+void nvhost_free_channel(struct nvhost_channel *ch);
 
 extern pid_t nvhost_debug_null_kickoff_pid;
 
@@ -111,5 +108,7 @@ static inline struct platform_device *nvhost_get_parent(
 	return (_dev->dev.parent && _dev->dev.parent != &platform_bus)
 		? to_platform_device(_dev->dev.parent) : NULL;
 }
+
+void nvhost_host1x_update_clk(struct platform_device *pdev);
 
 #endif

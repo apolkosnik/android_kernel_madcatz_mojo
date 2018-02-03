@@ -40,10 +40,12 @@ static struct emc_iso_usage emc_usage_table[TEGRA_EMC_ISO_USE_CASES_MAX_NUM];
 u32 tegra_get_dvfs_clk_change_latency_nsec(unsigned long emc_freq_khz)
 {
 	switch (tegra_get_chipid()) {
-	case TEGRA_CHIPID_TEGRA12:
+#ifdef CONFIG_ARCH_TEGRA_12x_SOC
+    case TEGRA_CHIPID_TEGRA12:
 	case TEGRA_CHIPID_TEGRA13:
 		return tegra12_get_dvfs_clk_change_latency_nsec(emc_freq_khz);
-	default:
+#endif
+    default:
 		return 0;
 	}
 }

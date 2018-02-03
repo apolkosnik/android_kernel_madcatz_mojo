@@ -787,12 +787,20 @@ static void sdhci_set_transfer_irqs(struct sdhci_host *host)
 		sdhci_clear_set_irqs(host, dma_irqs, pio_irqs);
 }
 
+/* container to handle DMA bus widths of 32/64 bit */
+
+union sdhci_dma_addr_t {
+	u64 a;
+	dma_addr_t b;
+};
+
 static void sdhci_prepare_data(struct sdhci_host *host, struct mmc_command *cmd)
 {
 	u8 count;
 	u8 ctrl;
 	struct mmc_data *data = cmd->data;
 	int ret;
+	union sdhci_dma_addr_t dma_addr;
 
 	WARN_ON(host->data);
 
@@ -900,9 +908,9 @@ static void sdhci_prepare_data(struct sdhci_host *host, struct mmc_command *cmd)
 				     SDHCI_QUIRK2_SUPPORT_64BIT_DMA)) {
 					if (host->quirks2 &
 					    SDHCI_QUIRK2_USE_64BIT_ADDR) {
-
+						dma_addr.b = host->adma_addr;
 						sdhci_writel(host,
-						(host->adma_addr >> 32)
+						(dma_addr.a >> 32)
 							& 0xFFFFFFFF,
 						SDHCI_UPPER_ADMA_ADDRESS);
 					} else {

@@ -56,49 +56,13 @@ static DEFINE_MUTEX(la_lock);
 
 #ifdef TEGRA_12X_OR_HIGHER_CONFIG
 
-int nvhost_vi_init(struct platform_device *dev)
-{
-	int ret = 0;
-	struct vi *tegra_vi = nvhost_get_private_data(dev);
-
-	if (!tegra_vi)
-		return -ENODEV;
-
-	tegra_vi->reg = regulator_get(&dev->dev, "avdd_dsi_csi");
-	if (IS_ERR(tegra_vi->reg)) {
-		if (tegra_vi->reg == ERR_PTR(-ENODEV)) {
-			ret = -ENODEV;
-			dev_info(&dev->dev,
-					"%s: no regulator device\n",
-					__func__);
-		} else {
-			dev_err(&dev->dev,
-					"%s: couldn't get regulator\n",
-					__func__);
-		}
-		tegra_vi->reg = NULL;
-		return ret;
-	}
-
-	return 0;
-}
-
-void nvhost_vi_deinit(struct platform_device *dev)
-{
-	struct vi *tegra_vi = nvhost_get_private_data(dev);
-
-	if (tegra_vi && tegra_vi->reg) {
-		regulator_put(tegra_vi->reg);
-		tegra_vi->reg = NULL;
-	}
-}
-
 int nvhost_vi_finalize_poweron(struct platform_device *dev)
 {
 	int ret = 0;
 	struct vi *tegra_vi;
 
 	tegra_vi = (struct vi *)nvhost_get_private_data(dev);
+
 	if (tegra_vi && tegra_vi->reg) {
 		ret = regulator_enable(tegra_vi->reg);
 		if (ret) {
@@ -113,7 +77,7 @@ int nvhost_vi_finalize_poweron(struct platform_device *dev)
 	if (dev->id == 0)
 		host1x_writel(dev, T12_VI_CFG_CG_CTRL, T12_CG_2ND_LEVEL_EN);
 
- fail:
+fail:
 	return ret;
 }
 
@@ -132,7 +96,7 @@ int nvhost_vi_prepare_poweroff(struct platform_device *dev)
 			goto fail;
 		}
 	}
- fail:
+fail:
 	return ret;
 }
 
@@ -189,7 +153,7 @@ static int vi_set_isomgr_request(struct vi *tegra_vi, uint vi_bw, uint lt)
 		"%s: failed to realize %u KBps\n", __func__, vi_bw);
 			return -ENOMEM;
 	}
-	return ret;
+	return 0;
 }
 
 static int vi_isomgr_release(struct vi *tegra_vi)
@@ -222,7 +186,7 @@ static int vi_set_la(struct vi *tegra_vi1, uint vi_bw)
 		(struct nvhost_device_data *)tegra_vi1->ndev->dev.platform_data;
 
 	if (!pdata_vi1)
-	    return -ENODEV;
+		return -ENODEV;
 
 	/* Copy device data for other vi device */
 	mutex_lock(&la_lock);
@@ -393,12 +357,14 @@ static int vi_release(struct inode *inode, struct file *file)
 
 #if defined(CONFIG_TEGRA_ISOMGR)
 	/* nullify isomgr request */
-	ret = vi_isomgr_release(tegra_vi);
-	if (ret) {
-		dev_err(&tegra_vi->ndev->dev,
-		"%s: failed to deallocate memory in isomgr\n",
-		__func__);
-		return -ENOMEM;
+	if (tegra_vi->isomgr_handle) {
+		ret = vi_isomgr_release(tegra_vi);
+		if (ret) {
+			dev_err(&tegra_vi->ndev->dev,
+			"%s: failed to deallocate memory in isomgr\n",
+			__func__);
+			return -ENOMEM;
+		}
 	}
 #endif
 

@@ -31,13 +31,14 @@
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
 #include <linux/tegra-soc.h>
-#include <linux/tegra_pm_domains.h>
 
 #include "dev.h"
 #include <trace/events/nvhost.h>
 
 #include <linux/nvhost.h>
 #include <linux/nvhost_ioctl.h>
+
+#include <linux/tegra_pm_domains.h>
 
 #include "debug.h"
 #include "bus_client.h"
@@ -51,6 +52,8 @@
 
 #include "nvhost_scale.h"
 #include "chip_support.h"
+#include "t114/t114.h"
+#include "t148/t148.h"
 #include "t124/t124.h"
 
 #define DRIVER_NAME		"host1x"
@@ -224,8 +227,8 @@ static int nvhost_ioctl_ctrl_sync_fence_create(struct nvhost_ctrl_userctx *ctx,
 		}
 	}
 
-	err = nvhost_sync_create_fence_fd(ctx->dev->dev, pts, args->num_pts,
-					  name, &args->fence_fd);
+	err = nvhost_sync_create_fence(&ctx->dev->syncpt, pts, args->num_pts,
+				       name, &args->fence_fd);
 out:
 	kfree(pts);
 	return err;
@@ -545,8 +548,7 @@ static inline int nvhost_set_sysfs_capability_node(
 
 static int nvhost_user_init(struct nvhost_master *host)
 {
-	dev_t devno;
-	int err;
+	int err, devno;
 
 	host->nvhost_class = class_create(THIS_MODULE, IFACE_NAME);
 	if (IS_ERR(host->nvhost_class)) {
@@ -618,10 +620,16 @@ fail:
 	return err;
 }
 
-void nvhost_set_chanops(struct nvhost_channel *ch)
+struct nvhost_channel *nvhost_alloc_channel(struct platform_device *dev)
 {
-	host_device_op().set_nvhost_chanops(ch);
+	return host_device_op().alloc_nvhost_channel(dev);
 }
+
+void nvhost_free_channel(struct nvhost_channel *ch)
+{
+	host_device_op().free_nvhost_channel(ch);
+}
+
 static void nvhost_free_resources(struct nvhost_master *host)
 {
 	kfree(host->intr.syncpt);
@@ -649,12 +657,43 @@ static int nvhost_alloc_resources(struct nvhost_master *host)
 }
 
 static struct of_device_id tegra_host1x_of_match[] = {
+#ifdef TEGRA_11X_OR_HIGHER_CONFIG
+	{ .compatible = "nvidia,tegra114-host1x",
+		.data = (struct nvhost_device_data *)&t11_host1x_info },
+#endif
+#ifdef TEGRA_14X_OR_HIGHER_CONFIG
+	{ .compatible = "nvidia,tegra148-host1x",
+		.data = (struct nvhost_device_data *)&t14_host1x_info },
+#endif
 #ifdef TEGRA_12X_OR_HIGHER_CONFIG
 	{ .compatible = "nvidia,tegra124-host1x",
 		.data = (struct nvhost_device_data *)&t124_host1x_info },
 #endif
 	{ },
 };
+
+void nvhost_host1x_update_clk(struct platform_device *pdev)
+{
+	struct nvhost_device_data *pdata = NULL;
+	struct nvhost_device_profile *profile;
+
+	/* There are only two chips which need this workaround, so hardcode */
+#ifdef TEGRA_11X_OR_HIGHER_CONFIG
+	if (tegra_get_chipid() == TEGRA_CHIPID_TEGRA11)
+		pdata = &t11_gr3d_info;
+#endif
+#ifdef TEGRA_14X_OR_HIGHER_CONFIG
+	if (tegra_get_chipid() == TEGRA_CHIPID_TEGRA14)
+		pdata = &t14_gr3d_info;
+#endif
+	if (!pdata)
+		return;
+
+	profile = pdata->power_profile;
+
+	if (profile && profile->actmon)
+		actmon_op().update_sample_period(profile->actmon);
+}
 
 int nvhost_host1x_finalize_poweron(struct platform_device *dev)
 {
@@ -756,15 +795,12 @@ static int nvhost_probe(struct platform_device *dev)
 	if (err)
 		goto fail;
 
-	err = nvhost_alloc_channels(host);
-	if (err)
-		goto fail;
-
 #ifdef CONFIG_PM_GENERIC_DOMAINS
 	pdata->pd.name = "tegra-host1x";
 	err = nvhost_module_add_domain(&pdata->pd, dev);
-
 #endif
+
+	mutex_init(&host->timeout_mutex);
 
 	nvhost_module_busy(dev);
 
@@ -803,12 +839,34 @@ static int __exit nvhost_remove(struct platform_device *dev)
 #else
 	nvhost_module_disable_clk(&dev->dev);
 #endif
-	nvhost_channel_list_free(host);
-
 	return 0;
 }
 
 #ifdef CONFIG_PM
+
+/*
+ * FIXME: Genpd disables the runtime pm while preparing for system
+ * suspend. As host1x clients may need host1x in suspend sequence
+ * for register reads/writes or syncpoint increments, we need to
+ * re-enable pm_runtime. As we *must* balance pm_runtime counter,
+ * we drop the reference in suspend complete callback, right before
+ * the genpd re-enables runtime pm.
+ *
+ * We should revisit the power code as this is hacky and
+ * caused by the way we use power domains.
+ */
+
+static int nvhost_suspend_prepare(struct device *dev)
+{
+	pm_runtime_enable(dev);
+	return 0;
+}
+
+static void nvhost_suspend_complete(struct device *dev)
+{
+	__pm_runtime_disable(dev, false);
+}
+
 static int nvhost_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -838,8 +896,10 @@ static int nvhost_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops host1x_pm_ops = {
-	.suspend = nvhost_suspend,
-	.resume = nvhost_resume,
+	.prepare = nvhost_suspend_prepare,
+	.complete = nvhost_suspend_complete,
+	.suspend_late = nvhost_suspend,
+	.resume_early = nvhost_resume,
 };
 #endif /* CONFIG_PM */
 

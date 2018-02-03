@@ -56,33 +56,26 @@ static int show_channels(struct platform_device *pdev, void *data,
 	struct output *o = data;
 	struct nvhost_master *m;
 	struct nvhost_device_data *pdata;
-	int index;
 
 	if (pdev == NULL)
 		return 0;
 
-	m = nvhost_get_host(pdev);
 	pdata = platform_get_drvdata(pdev);
+	m = nvhost_get_host(pdev);
+	ch = nvhost_getchannel(pdata->channel, true, false);
+	if (!ch)
+		return 0;
 
-	for (index = 0; index < pdata->num_channels; index++) {
-		ch = pdata->channels[index];
-		if (!ch || !ch->dev) {
-			nvhost_debug_output(o, "%d channel of %s unmapped\n",
-					index + 1, pdev->name);
-			continue;
-		}
-		nvhost_getchannel(ch);
-		if (ch->chid != locked_id)
-			mutex_lock(&ch->cdma.lock);
-		if (fifo)
-			nvhost_get_chip_ops()->debug.show_channel_fifo(
-				m, ch, o, ch->chid);
-		nvhost_get_chip_ops()->debug.show_channel_cdma(
-			m, ch, o, ch->chid);
-		if (ch->chid != locked_id)
-			mutex_unlock(&ch->cdma.lock);
-		nvhost_putchannel(ch);
-	}
+	if (ch->chid != locked_id)
+		mutex_lock(&ch->cdma.lock);
+	if (fifo)
+		nvhost_get_chip_ops()->debug.show_channel_fifo(
+			m, ch, o, pdata->index);
+	nvhost_get_chip_ops()->debug.show_channel_cdma(
+		m, ch, o, ch->chid);
+	if (ch->chid != locked_id)
+		mutex_unlock(&ch->cdma.lock);
+	nvhost_putchannel(ch, false);
 
 	return 0;
 }
@@ -104,10 +97,9 @@ static void show_syncpts(struct nvhost_master *m, struct output *o)
 	int i;
 	nvhost_debug_output(o, "---- syncpts ----\n");
 	for (i = 0; i < nvhost_syncpt_nb_pts(&m->syncpt); i++) {
-		bool assigned = nvhost_is_syncpt_assigned(&m->syncpt, i);
 		u32 max = nvhost_syncpt_read_max(&m->syncpt, i);
 		u32 min = nvhost_syncpt_update_min(&m->syncpt, i);
-		if ((!assigned) || (!min && !max))
+		if (!min && !max)
 			continue;
 		nvhost_debug_output(o, "id %d (%s) min %d max %d\n",
 				i, nvhost_get_chip_ops()->syncpt.name(&m->syncpt, i),

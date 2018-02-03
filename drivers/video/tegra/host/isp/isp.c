@@ -26,11 +26,14 @@
 #include <linux/of_platform.h>
 #include <linux/irq.h>
 #include <linux/workqueue.h>
+
 #include <linux/tegra_pm_domains.h>
 
 #include "dev.h"
 #include "bus_client.h"
 #include "nvhost_acm.h"
+#include "t114/t114.h"
+#include "t148/t148.h"
 #include "t124/t124.h"
 
 #include <linux/uaccess.h>
@@ -51,6 +54,14 @@
 #define ISP_DEFAULT_MAX_BW	840000
 
 static struct of_device_id tegra_isp_of_match[] = {
+#ifdef TEGRA_11X_OR_HIGHER_CONFIG
+	{ .compatible = "nvidia,tegra114-isp",
+		.data = (struct nvhost_device_data *)&t11_isp_info },
+#endif
+#ifdef TEGRA_14X_OR_HIGHER_CONFIG
+	{ .compatible = "nvidia,tegra148-isp",
+		.data = (struct nvhost_device_data *)&t14_isp_info },
+#endif
 #ifdef TEGRA_12X_OR_HIGHER_CONFIG
 	{ .compatible = "nvidia,tegra124-isp",
 		.data = (struct nvhost_device_data *)&t124_isp_info },
@@ -142,7 +153,7 @@ static int isp_isomgr_request(struct isp *tegra_isp, uint isp_bw, uint lt)
 		"%s: failed to realize %u KBps\n", __func__, isp_bw);
 			return -ENOMEM;
 	}
-	return ret;
+	return 0;
 }
 
 static int isp_isomgr_release(struct isp *tegra_isp)
@@ -296,12 +307,6 @@ static int isp_probe(struct platform_device *dev)
 	tegra_isp->dev_id = dev_id;
 	tegra_isp->ndev = dev;
 
-#if defined(CONFIG_TEGRA_ISOMGR)
-	err = isp_isomgr_register(tegra_isp);
-	if (err)
-		goto camera_isp_unregister;
-#endif
-
 	pdata->private_data = tegra_isp;
 
 #ifdef TEGRA_12X_OR_HIGHER_CONFIG
@@ -368,10 +373,6 @@ static int isp_probe(struct platform_device *dev)
 	return 0;
 
 camera_isp_unregister:
-#if defined(CONFIG_TEGRA_ISOMGR)
-	if (tegra_isp->isomgr_handle)
-		isp_isomgr_unregister(tegra_isp);
-#endif
 	dev_err(&dev->dev, "%s: failed\n", __func__);
 
 	return err;
@@ -472,6 +473,19 @@ long isp_ioctl(struct file *file,
 		}
 
 #if defined(CONFIG_TEGRA_ISOMGR)
+		/*
+		 * Register ISP as isomgr client.
+		 */
+		if (!tegra_isp->isomgr_handle) {
+			ret = isp_isomgr_register(tegra_isp);
+			if (ret) {
+				dev_err(&tegra_isp->ndev->dev,
+				"%s: failed to register ISP as isomgr client\n",
+				__func__);
+				return -ENOMEM;
+			}
+		}
+
 		if (tegra_isp->isomgr_handle &&
 			la_client == ISP_HARD_ISO_CLIENT) {
 			/*
@@ -488,8 +502,7 @@ long isp_ioctl(struct file *file,
 			isp_bw = isp_bw * 1000;
 
 			ret = isp_isomgr_request(tegra_isp, isp_bw, 4);
-
-			if (!ret) {
+			if (ret) {
 				dev_err(&tegra_isp->ndev->dev,
 				"%s: failed to reserve %u KBps with isomgr\n",
 				__func__, isp_bw);
@@ -534,12 +547,14 @@ static int isp_release(struct inode *inode, struct file *file)
 	struct isp *tegra_isp = file->private_data;
 
 	/* nullify isomgr request */
-	ret = isp_isomgr_release(tegra_isp);
-	if (ret) {
-		dev_err(&tegra_isp->ndev->dev,
-		"%s: failed to deallocate memory in isomgr\n",
-		__func__);
-		return -ENOMEM;
+	if (tegra_isp->isomgr_handle) {
+		ret = isp_isomgr_release(tegra_isp);
+		if (ret) {
+			dev_err(&tegra_isp->ndev->dev,
+			"%s: failed to deallocate memory in isomgr\n",
+			__func__);
+			return -ENOMEM;
+		}
 	}
 #endif
 	return 0;
