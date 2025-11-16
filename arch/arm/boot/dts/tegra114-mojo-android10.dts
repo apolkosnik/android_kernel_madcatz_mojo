@@ -1,0 +1,443 @@
+// SPDX-License-Identifier: GPL-2.0
+/dts-v1/;
+
+#include <dt-bindings/input/input.h>
+#include "tegra114.dtsi"
+
+/ {
+	model = "MadCatz MOJO (NVIDIA Tegra114)";
+	compatible = "madcatz,mojo", "nvidia,tegra114";
+
+	aliases {
+		serial0 = &uarta;
+		serial1 = &uartb;
+		serial2 = &uartc;
+		serial3 = &uartd;
+	};
+
+	chosen {
+		stdout-path = "serial3:115200n8";
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x80000000>; /* 2GB */
+	};
+
+	host1x@50000000 {
+		hdmi@54280000 {
+			status = "okay";
+
+			vdd-supply = <&vdd_hdmi_5v0>;
+			pll-supply = <&ldo1_reg>;
+			hdmi-supply = <&ldoln_reg>;
+
+			nvidia,ddc-i2c-bus = <&hdmi_ddc>;
+			nvidia,hpd-gpio = <&gpio TEGRA_GPIO(N, 7) GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	pinmux@70000868 {
+		pinctrl-names = "default";
+		pinctrl-0 = <&state_default>;
+
+		state_default: pinmux {
+			/* Complete pinmux from existing DTS - inheriting */
+		};
+	};
+
+	/* UART A - General purpose */
+	serial@70006000 {
+		status = "okay";
+	};
+
+	/* UART B - Bluetooth */
+	serial@70006040 {
+		status = "okay";
+		nvidia,enable-modem-interrupt;
+	};
+
+	/* UART C - General purpose */
+	serial@70006200 {
+		status = "okay";
+	};
+
+	/* UART D - Debug console */
+	serial@70006300 {
+		status = "okay";
+	};
+
+	/* PWR I2C - PMIC */
+	i2c@7000d000 {
+		status = "okay";
+		clock-frequency = <400000>;
+
+		pmic: tps65913@58 {
+			compatible = "ti,palmas";
+			reg = <0x58>;
+			interrupts = <0 86 IRQ_TYPE_LEVEL_HIGH>;
+
+			#interrupt-cells = <2>;
+			interrupt-controller;
+
+			palmas_gpio: gpio {
+				compatible = "ti,palmas-gpio";
+				gpio-controller;
+				#gpio-cells = <2>;
+			};
+
+			pmic {
+				compatible = "ti,tps65913-pmic", "ti,palmas-pmic";
+
+				regulators {
+					smps123_reg: smps123 {
+						regulator-name = "vdd-cpu";
+						regulator-min-microvolt = <900000>;
+						regulator-max-microvolt = <1350000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					smps45_reg: smps45 {
+						regulator-name = "vdd-core";
+						regulator-min-microvolt = <900000>;
+						regulator-max-microvolt = <1400000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					smps6_reg: smps6 {
+						regulator-name = "vdd-3v3-io";
+						regulator-min-microvolt = <3200000>;
+						regulator-max-microvolt = <3200000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					smps7_reg: smps7 {
+						regulator-name = "vddio-ddr";
+						regulator-min-microvolt = <1350000>;
+						regulator-max-microvolt = <1350000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					smps8_reg: smps8 {
+						regulator-name = "vddio-sys";
+						regulator-min-microvolt = <1800000>;
+						regulator-max-microvolt = <1800000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					smps9_reg: smps9 {
+						regulator-name = "vddio-sd-slot";
+						regulator-min-microvolt = <2900000>;
+						regulator-max-microvolt = <2900000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					smps10_reg: smps10 {
+						regulator-name = "vdd-5v0";
+						regulator-min-microvolt = <5000000>;
+						regulator-max-microvolt = <5000000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					ldo1_reg: ldo1 {
+						regulator-name = "avdd-pll";
+						regulator-min-microvolt = <1050000>;
+						regulator-max-microvolt = <1050000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					ldo2_reg: ldo2 {
+						regulator-name = "avdd-dsi-csi";
+						regulator-min-microvolt = <1200000>;
+						regulator-max-microvolt = <1200000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					ldo3_reg: ldo3 {
+						regulator-name = "vpp-fuse";
+						regulator-min-microvolt = <1800000>;
+						regulator-max-microvolt = <1800000>;
+					};
+
+					ldo8_reg: ldo8 {
+						regulator-name = "vdd-rtc";
+						regulator-min-microvolt = <950000>;
+						regulator-max-microvolt = <950000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+
+					ldo9_reg: ldo9 {
+						regulator-name = "vddio-sdmmc3";
+						regulator-min-microvolt = <1800000>;
+						regulator-max-microvolt = <2900000>;
+					};
+
+					ldoln_reg: ldoln {
+						regulator-name = "avdd-hdmi";
+						regulator-min-microvolt = <3300000>;
+						regulator-max-microvolt = <3300000>;
+					};
+
+					ldousb_reg: ldousb {
+						regulator-name = "avdd-usb";
+						regulator-min-microvolt = <3300000>;
+						regulator-max-microvolt = <3300000>;
+						regulator-always-on;
+						regulator-boot-on;
+					};
+				};
+			};
+
+			extcon {
+				compatible = "ti,palmas-usb";
+				ti,enable-id-detection;
+				ti,enable-vbus-detection;
+			};
+		};
+	};
+
+	/* GEN1 I2C - Sensors & Audio Codec */
+	i2c@7000c000 {
+		status = "okay";
+		clock-frequency = <100000>;
+
+		rt5639: audio-codec@1c {
+			compatible = "realtek,rt5640";
+			reg = <0x1c>;
+			interrupt-parent = <&gpio>;
+			interrupts = <TEGRA_GPIO(W, 3) IRQ_TYPE_EDGE_FALLING>;
+			realtek,ldo1-en-gpios = <&gpio TEGRA_GPIO(V, 3) GPIO_ACTIVE_HIGH>;
+		};
+
+		mpu6050: gyroscope@69 {
+			compatible = "invensense,mpu6050";
+			reg = <0x69>;
+			interrupt-parent = <&gpio>;
+			interrupts = <TEGRA_GPIO(R, 3) IRQ_TYPE_EDGE_RISING>;
+			vdd-supply = <&smps8_reg>;
+			vddio-supply = <&smps8_reg>;
+			mount-matrix = "0", "1", "0",
+				       "1", "0", "0",
+				       "0", "0", "-1";
+		};
+
+		ak8975: magnetometer@d {
+			compatible = "asahi-kasei,ak8975";
+			reg = <0x0d>;
+			vdd-supply = <&smps8_reg>;
+			vid-supply = <&smps8_reg>;
+			mount-matrix = "0", "1", "0",
+				       "1", "0", "0",
+				       "0", "0", "-1";
+		};
+
+		nct1008: temperature-sensor@4c {
+			compatible = "onnn,nct1008";
+			reg = <0x4c>;
+			vcc-supply = <&smps8_reg>;
+			interrupt-parent = <&gpio>;
+			interrupts = <TEGRA_GPIO(O, 4) IRQ_TYPE_LEVEL_LOW>;
+			#thermal-sensor-cells = <1>;
+		};
+	};
+
+	/* GEN2 I2C - Power Monitor */
+	i2c@7000c400 {
+		status = "okay";
+		clock-frequency = <100000>;
+
+		ina3221@40 {
+			compatible = "ti,ina3221";
+			reg = <0x40>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			channel@0 {
+				reg = <0>;
+				label = "PMU_MUX_RSENSE";
+				shunt-resistor-micro-ohms = <5000>;
+			};
+
+			channel@1 {
+				reg = <1>;
+				label = "VDD_5V_CPU";
+				shunt-resistor-micro-ohms = <5000000>;
+			};
+
+			channel@2 {
+				reg = <2>;
+				status = "disabled";
+			};
+		};
+	};
+
+	/* CAM I2C */
+	i2c@7000c500 {
+		status = "okay";
+		clock-frequency = <400000>;
+	};
+
+	/* HDMI DDC */
+	hdmi_ddc: i2c@7000c700 {
+		status = "okay";
+		clock-frequency = <10000>;
+	};
+
+	/* SD/MMC */
+	mmc@78000000 {
+		status = "okay";
+		bus-width = <4>;
+		cd-gpios = <&gpio TEGRA_GPIO(V, 2) GPIO_ACTIVE_LOW>;
+		wp-gpios = <&gpio TEGRA_GPIO(Q, 4) GPIO_ACTIVE_HIGH>;
+		vmmc-supply = <&vddio_sd_slot>;
+		vqmmc-supply = <&ldo9_reg>;
+	};
+
+	/* WiFi SDIO */
+	mmc@78000200 {
+		status = "okay";
+		bus-width = <4>;
+		non-removable;
+		vmmc-supply = <&smps6_reg>;
+		vqmmc-supply = <&smps8_reg>;
+		keep-power-in-suspend;
+
+		brcmf: wifi@1 {
+			compatible = "brcm,bcm4329-fmac";
+			reg = <1>;
+			interrupt-parent = <&gpio>;
+			interrupts = <TEGRA_GPIO(U, 5) IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "host-wake";
+		};
+	};
+
+	/* eMMC */
+	mmc@78000600 {
+		status = "okay";
+		bus-width = <8>;
+		non-removable;
+		vmmc-supply = <&smps6_reg>;
+		vqmmc-supply = <&smps8_reg>;
+	};
+
+	/* USB */
+	usb@7d000000 {
+		status = "okay";
+		dr_mode = "otg";
+		nvidia,vbus-gpio = <&gpio TEGRA_GPIO(N, 4) GPIO_ACTIVE_HIGH>;
+	};
+
+	usb@7d008000 {
+		status = "okay";
+	};
+
+	clocks {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		clk32k_in: clock@0 {
+			compatible = "fixed-clock";
+			reg = <0>;
+			#clock-cells = <0>;
+			clock-frequency = <32768>;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		power {
+			label = "Power";
+			gpios = <&gpio TEGRA_GPIO(Q, 0) GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_POWER>;
+			debounce-interval = <10>;
+			wakeup-source;
+		};
+	};
+
+	regulators {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		vdd_hdmi_5v0: regulator@0 {
+			compatible = "regulator-fixed";
+			reg = <0>;
+			regulator-name = "vdd-hdmi-5v0";
+			regulator-min-microvolt = <5000000>;
+			regulator-max-microvolt = <5000000>;
+			gpio = <&gpio TEGRA_GPIO(K, 6) GPIO_ACTIVE_HIGH>;
+			enable-active-high;
+			vin-supply = <&smps10_reg>;
+		};
+
+		vddio_sd_slot: regulator@1 {
+			compatible = "regulator-fixed";
+			reg = <1>;
+			regulator-name = "vddio-sd-slot";
+			regulator-min-microvolt = <2900000>;
+			regulator-max-microvolt = <2900000>;
+			gpio = <&gpio TEGRA_GPIO(K, 1) GPIO_ACTIVE_HIGH>;
+			enable-active-high;
+			vin-supply = <&smps9_reg>;
+		};
+
+		usb_vbus: regulator@2 {
+			compatible = "regulator-fixed";
+			reg = <2>;
+			regulator-name = "usb-vbus";
+			regulator-min-microvolt = <5000000>;
+			regulator-max-microvolt = <5000000>;
+			gpio = <&gpio TEGRA_GPIO(N, 4) GPIO_ACTIVE_HIGH>;
+			enable-active-high;
+			vin-supply = <&smps9_reg>;
+		};
+	};
+
+	sound {
+		compatible = "nvidia,tegra-audio-rt5640-mojo",
+			     "nvidia,tegra-audio-rt5640";
+		nvidia,model = "NVIDIA Tegra Mojo RT5640";
+
+		nvidia,audio-routing =
+			"Headphones", "HPOR",
+			"Headphones", "HPOL",
+			"Speakers", "SPORP",
+			"Speakers", "SPORN",
+			"Speakers", "SPOLP",
+			"Speakers", "SPOLN";
+
+		nvidia,i2s-controller = <&tegra_i2s1>;
+		nvidia,audio-codec = <&rt5639>;
+
+		clocks = <&tegra_car TEGRA114_CLK_PLL_A>,
+			 <&tegra_car TEGRA114_CLK_PLL_A_OUT0>,
+			 <&tegra_car TEGRA114_CLK_EXTERN1>;
+		clock-names = "pll_a", "pll_a_out0", "mclk";
+	};
+
+	bluetooth {
+		compatible = "brcm,bcm4329-bt";
+		shutdown-gpios = <&gpio TEGRA_GPIO(R, 1) GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&gpio TEGRA_GPIO(EE, 1) GPIO_ACTIVE_HIGH>;
+		host-wakeup-gpios = <&gpio TEGRA_GPIO(U, 6) GPIO_ACTIVE_HIGH>;
+	};
+
+	wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&gpio TEGRA_GPIO(X, 7) GPIO_ACTIVE_LOW>;
+		power-off-delay-us = <300>;
+		post-power-on-delay-ms = <200>;
+	};
+};
